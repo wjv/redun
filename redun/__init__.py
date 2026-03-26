@@ -24,9 +24,11 @@ version = __version__
 
 if TYPE_CHECKING:
     from redun.executors.alias import AliasExecutor
+    from redun.executors.apptainer import ApptainerExecutor
     from redun.executors.aws_batch import AWSBatchExecutor
     from redun.executors.aws_glue import AWSGlueExecutor
     from redun.executors.docker import DockerExecutor
+    from redun.executors.pueue import PueueExecutor
 
     try:
         from redun.executors.k8s import K8SExecutor
@@ -41,12 +43,16 @@ if TYPE_CHECKING:
     from redun.executors.local import LocalExecutor
 else:
     AliasExecutor = register_executor("alias", "redun.executors.alias.AliasExecutor")
+    ApptainerExecutor = register_executor(
+        "apptainer", "redun.executors.apptainer.ApptainerExecutor"
+    )
     AWSBatchExecutor = register_executor("aws_batch", "redun.executors.aws_batch.AWSBatchExecutor")
     AWSGlueExecutor = register_executor("aws_glue", "redun.executors.aws_glue.AWSGlueExecutor")
     DockerExecutor = register_executor("docker", "redun.executors.docker.DockerExecutor")
     K8SExecutor = register_executor("k8s", "redun.executors.k8s.K8SExecutor")
     GCPBatchExecutor = register_executor("gcp_batch", "redun.executors.gcp_batch.GCPBatchExecutor")
     LocalExecutor = register_executor("local", "redun.executors.local.LocalExecutor")
+    PueueExecutor = register_executor("pueue", "redun.executors.pueue.PueueExecutor")
 
 
 # Cached Schedulers.
