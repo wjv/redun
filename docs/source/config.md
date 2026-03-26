@@ -792,6 +792,296 @@ Maximum number (default: 1000) of equivalent tasks that will be submitted togeth
 
 A float (default: 3.0) that specifies the maximum time, in seconds, jobs will wait before submission to be possibly bundled into an array job.
 
+#### Apptainer executor
+
+The [Apptainer executor](executors.md#apptainer-executor) (`type = apptainer`) executes tasks inside Apptainer (formerly Singularity) containers on the local machine.
+
+##### `image`
+
+A string that specifies the container image. Accepts a local SIF file path, a Docker registry URI (`docker://`), or an Apptainer library URI (`library://`). This can be overridden on a per task basis using task options.
+
+##### `scratch`
+
+A string that specifies the scratch path used to communicate with the container. The scratch directory is bind-mounted at the same absolute path inside the container. If the path is relative, it is interpreted relative to the redun configuration directory.
+
+##### `vcpus`
+
+An integer (default: 1) that specifies the default number of virtual CPUs. This can be overridden on a per task basis using task options.
+
+##### `gpus`
+
+An integer (default: 0) that specifies the default number of GPUs. When non-zero, enables GPU passthrough via `--nv` (NVIDIA) or `--rocm` (AMD). This can be overridden on a per task basis using task options.
+
+##### `memory`
+
+An integer (default: 4) that specifies the default amount of memory in GB. This can be overridden on a per task basis using task options.
+
+##### `no_home`
+
+A bool (default: True) that specifies whether to pass `--no-home` to Apptainer, preventing the user's home directory from being mounted inside the container. Recommended for reproducibility.
+
+##### `gpu_type`
+
+A string (default: `nvidia`) that specifies the GPU type for passthrough. Set to `rocm` for AMD GPUs.
+
+##### `extra_args`
+
+A string (default: empty) of additional space-separated arguments to pass to `apptainer exec`. For example, `--cleanenv --writable-tmpfs`.
+
+##### `volumes`
+
+A JSON list of pairs that specifies bind mounts. Each pair is a host and container path. The scratch directory is always mounted automatically.
+
+```ini
+volumes = [["/data/reference", "/data/reference"], ["/tmp", "/tmp"]]
+```
+
+If host paths are relative, they are assumed relative to the configuration directory.
+
+##### `job_monitor_interval`
+
+A float (default: 0.5) that specifies how often, in seconds, to poll running processes for completion.
+
+##### `code_package`
+
+A bool (default: True) that specifies whether to perform [code packaging](executors.md#code-packaging).
+
+##### `code_includes`
+
+A string (default: `**/*.py`) that specifies a pattern for which files should be included in a code package. Multiple patterns can be specified separated by whitespace.
+
+##### `code_excludes`
+
+A string (default: None) that specifies a pattern for which files should be excluded from a code package. Multiple patterns can be specified separated by whitespace.
+
+#### Pueue executor
+
+The [Pueue executor](executors.md#pueue-executor) (`type = pueue`) submits tasks to a Pueue daemon for managed execution on a local server.
+
+##### `scratch`
+
+A string that specifies the scratch path used to exchange task arguments and results. If the path is relative, it is interpreted relative to the redun configuration directory.
+
+##### `group`
+
+A string (default: None) that specifies the Pueue group to submit jobs to. If not set, jobs are submitted to Pueue's default group.
+
+##### `jobs`
+
+An integer (default: 1) that specifies the number of job slots each task consumes. This is passed to `pueue add --jobs N` and is used by the Pueue daemon's job-slot-based resource management. This can be overridden on a per task basis using task options.
+
+##### `vcpus`
+
+An integer (default: 1) that specifies the default number of virtual CPUs. Used when container wrapping is enabled. This can be overridden on a per task basis using task options.
+
+##### `gpus`
+
+An integer (default: 0) that specifies the default number of GPUs. Used when container wrapping is enabled. This can be overridden on a per task basis using task options.
+
+##### `memory`
+
+An integer (default: 4) that specifies the default amount of memory in GB. Used when container wrapping is enabled. This can be overridden on a per task basis using task options.
+
+##### `container_type`
+
+An optional string that specifies the container runtime to wrap commands with. Supported values: `apptainer`, `docker`. If not set, commands run directly without a container.
+
+##### `image`
+
+A string that specifies the container image when `container_type` is set.
+
+##### `no_home`
+
+A bool (default: True) that specifies whether to pass `--no-home` when using Apptainer container wrapping.
+
+##### `gpu_type`
+
+A string (default: `nvidia`) that specifies the GPU type when using Apptainer container wrapping.
+
+##### `extra_container_args`
+
+A string (default: empty) of additional space-separated arguments to pass to the container runtime.
+
+##### `volumes`
+
+A JSON list of bind mount pairs (same format as the Docker and Apptainer executors). The scratch directory is always mounted automatically when container wrapping is enabled.
+
+##### `job_monitor_interval`
+
+A float (default: 2.0) that specifies how often, in seconds, to poll `pueue status --json` for job completion.
+
+##### `code_package`
+
+A bool (default: True) that specifies whether to perform [code packaging](executors.md#code-packaging).
+
+##### `code_includes`
+
+A string (default: `**/*.py`) that specifies a pattern for which files should be included in a code package.
+
+##### `code_excludes`
+
+A string (default: None) that specifies a pattern for which files should be excluded from a code package.
+
+#### Slurm executor
+
+The [Slurm executor](executors.md#slurm-executor) (`type = slurm`) executes tasks as batch jobs on a Slurm cluster.
+
+##### `scratch`
+
+A string that specifies the scratch path on a cluster-accessible shared filesystem (NFS, Lustre, GPFS, etc.). This is used to exchange task arguments and results between the scheduler and compute nodes. If the path is relative, it is interpreted relative to the redun configuration directory.
+
+##### `partition`
+
+An optional string that specifies the Slurm partition (queue) to submit to. Maps to `sbatch --partition`.
+
+##### `account`
+
+An optional string that specifies the Slurm account for job billing. Maps to `sbatch --account`.
+
+##### `qos`
+
+An optional string that specifies the Slurm quality of service. Maps to `sbatch --qos`.
+
+##### `time_limit`
+
+An optional string that specifies the wall-clock time limit in Slurm format (e.g. `01:00:00` for one hour, `7-00:00:00` for seven days). Maps to `sbatch --time`.
+
+##### `vcpus`
+
+An integer (default: 1) that specifies the default number of CPUs per task. Maps to `sbatch --cpus-per-task`. This can be overridden on a per task basis using task options.
+
+##### `gpus`
+
+An integer (default: 0) that specifies the default number of GPUs. Maps to `sbatch --gres=gpu:N`. This can be overridden on a per task basis using task options.
+
+##### `memory`
+
+An integer (default: 4) that specifies the default amount of memory in GB. Maps to `sbatch --mem`. This can be overridden on a per task basis using task options.
+
+##### `nodes`
+
+An integer (default: 1) that specifies the number of nodes to request. Maps to `sbatch --nodes`.
+
+##### `extra_sbatch_args`
+
+A string (default: empty) of additional space-separated arguments to pass to `sbatch`. For example, `--mail-type=END --mail-user=user@example.com`.
+
+##### `container_type`
+
+An optional string that specifies the container runtime to wrap commands with. Supported values: `apptainer`, `docker`. If not set, commands run directly on the compute node.
+
+##### `image`
+
+A string that specifies the container image when `container_type` is set.
+
+##### `no_home`
+
+A bool (default: True) that specifies whether to pass `--no-home` when using Apptainer container wrapping.
+
+##### `gpu_type`
+
+A string (default: `nvidia`) that specifies the GPU type when using Apptainer container wrapping.
+
+##### `extra_container_args`
+
+A string (default: empty) of additional space-separated arguments to pass to the container runtime.
+
+##### `volumes`
+
+A JSON list of bind mount pairs. The scratch directory is always mounted automatically when container wrapping is enabled.
+
+##### `job_monitor_interval`
+
+A float (default: 10.0) that specifies how often, in seconds, to poll `sacct` for job completion.
+
+##### `code_package`
+
+A bool (default: True) that specifies whether to perform [code packaging](executors.md#code-packaging).
+
+##### `code_includes`
+
+A string (default: `**/*.py`) that specifies a pattern for which files should be included in a code package.
+
+##### `code_excludes`
+
+A string (default: None) that specifies a pattern for which files should be excluded from a code package.
+
+#### SGE executor
+
+The [SGE executor](executors.md#sge-executor) (`type = sge`) executes tasks as batch jobs on a Sun Grid Engine cluster.
+
+##### `scratch`
+
+A string that specifies the scratch path on a cluster-accessible shared filesystem. This is used to exchange task arguments and results between the scheduler and compute nodes. If the path is relative, it is interpreted relative to the redun configuration directory.
+
+##### `queue`
+
+An optional string that specifies the SGE queue to submit to. Maps to `qsub -q`.
+
+##### `parallel_environment`
+
+An optional string that specifies the SGE parallel environment (e.g. `smp`). When set and `vcpus` is greater than 1, maps to `qsub -pe <pe> <vcpus>`.
+
+##### `project`
+
+An optional string that specifies the SGE project for accounting. Maps to `qsub -P`.
+
+##### `vcpus`
+
+An integer (default: 1) that specifies the default number of slots to request. When greater than 1 and `parallel_environment` is set, multiple slots are requested. This can be overridden on a per task basis using task options.
+
+##### `gpus`
+
+An integer (default: 0) that specifies the default number of GPUs. Maps to `qsub -l gpu=N`. This can be overridden on a per task basis using task options.
+
+##### `memory`
+
+An integer (default: 4) that specifies the default amount of memory per slot in GB. Maps to `qsub -l h_vmem=NG`. This can be overridden on a per task basis using task options.
+
+##### `extra_qsub_args`
+
+A string (default: empty) of additional space-separated arguments to pass to `qsub`.
+
+##### `container_type`
+
+An optional string that specifies the container runtime to wrap commands with. Supported values: `apptainer`, `docker`. If not set, commands run directly on the compute node.
+
+##### `image`
+
+A string that specifies the container image when `container_type` is set.
+
+##### `no_home`
+
+A bool (default: True) that specifies whether to pass `--no-home` when using Apptainer container wrapping.
+
+##### `gpu_type`
+
+A string (default: `nvidia`) that specifies the GPU type when using Apptainer container wrapping.
+
+##### `extra_container_args`
+
+A string (default: empty) of additional space-separated arguments to pass to the container runtime.
+
+##### `volumes`
+
+A JSON list of bind mount pairs. The scratch directory is always mounted automatically when container wrapping is enabled.
+
+##### `job_monitor_interval`
+
+A float (default: 10.0) that specifies how often, in seconds, to poll `qstat` for job completion.
+
+##### `code_package`
+
+A bool (default: True) that specifies whether to perform [code packaging](executors.md#code-packaging).
+
+##### `code_includes`
+
+A string (default: `**/*.py`) that specifies a pattern for which files should be included in a code package.
+
+##### `code_excludes`
+
+A string (default: None) that specifies a pattern for which files should be excluded from a code package.
+
 ## Configuration variables
 
 The redun configuration file supports [variable interpolation](https://docs.python.org/3/library/configparser.html#configparser.ExtendedInterpolation). When using the `${var}` variable reference syntax, redun will replace the variable reference with the value of the variable `var` from one of these sources (in descreasing precedence):

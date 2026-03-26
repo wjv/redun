@@ -258,3 +258,231 @@ A list of files that will be made available in the root directory of the run.
 The **k8s executor** executes tasks as jobs on a [Kubernetes](https://kubernetes.io/) cluster. This executors works similar to the [AWS Batch Executor](#aws-batch-executor) in terms of using scratch object storage to transfer task arguments, results, and code packaging. See the [configuration documentation](config.md#kubernetes-k8s-executor) for more details.
 
 Note: The k8s executor is new executor provided as a beta release. If you experience an issues, please report them to help improve the implementation.
+
+## Apptainer executor
+
+The **Apptainer executor** (`type = apptainer`) executes tasks inside [Apptainer](https://apptainer.org/) (formerly Singularity) containers. Apptainer is the standard container runtime in HPC environments — it runs unprivileged (no root or daemon required) and uses SIF image files.
+
+Unlike the Docker executor, Apptainer has no background daemon. Each job is launched as a foreground `apptainer exec` subprocess, and the executor tracks completion by polling the process status.
+
+### Configuration
+
+At a minimum, you must configure an image and a scratch path. See the [configuration documentation](config.md#apptainer-executor) for the full list of options.
+
+```ini
+[executors.apptainer]
+type = apptainer
+image = /path/to/container.sif
+scratch = /shared/scratch/redun
+```
+
+### Images
+
+The `image` option accepts any reference that `apptainer exec` understands:
+
+- A local SIF file: `/path/to/container.sif`
+- A Docker registry URI: `docker://ubuntu:22.04`
+- An Apptainer library URI: `library://user/collection/container:tag`
+
+### Bind mounts
+
+Apptainer bind mounts use the `volumes` option (same JSON format as the Docker executor). The scratch directory is always mounted automatically at the same path inside the container.
+
+```ini
+volumes = [["/data/reference", "/data/reference"], ["/tmp", "/tmp"]]
+```
+
+### GPU support
+
+Set `gpus` to a non-zero value to enable GPU passthrough. By default, this uses the `--nv` flag for NVIDIA GPUs. For AMD GPUs, set `gpu_type = rocm`.
+
+### Code packaging
+
+Code packaging works the same way as for the [Docker](#docker-executor) and [AWS Batch](#aws-batch-executor) executors. By default, all `**/*.py` files are packaged into a tar file in the scratch directory and extracted inside the container before task execution.
+
+### Usage example
+
+```py
+@task(executor="apptainer")
+def align_reads(sample: str, reference: File) -> File:
+    # This runs inside the Apptainer container.
+    return run_alignment(sample, reference)
+
+@task(executor="apptainer", memory=32, gpus=1)
+def call_variants(aligned: File) -> File:
+    # Override resource defaults per task.
+    return run_variant_caller(aligned)
+```
+
+## Pueue executor
+
+The **Pueue executor** (`type = pueue`) submits tasks to a [Pueue](https://github.com/Nukesor/pueue) daemon for managed execution on a local server. Pueue is a command-line task queue that manages sequential and parallel execution of shell commands.
+
+This executor targets a Pueue fork that adds job-slot-based resource management (`pueued --jobs N`), allowing tasks to declare how many resource slots they consume. This is useful for managing concurrent workloads on a single multi-core server without a full cluster scheduler.
+
+### How it works
+
+1. The executor submits each redun job via `pueue add`, receiving a task ID.
+2. A monitor thread polls `pueue status --json` to detect job completion.
+3. Task arguments and results are exchanged through pickle files in a shared scratch directory.
+
+### Configuration
+
+At a minimum, you must configure a scratch path. See the [configuration documentation](config.md#pueue-executor) for the full list of options.
+
+```ini
+[executors.pueue]
+type = pueue
+scratch = /shared/scratch/redun
+group = default
+jobs = 1
+```
+
+### Job slots
+
+The `jobs` option specifies how many resource slots each task consumes (default: 1). When the Pueue daemon is started with `pueued --jobs N`, it ensures that the total slot usage of running tasks never exceeds N. This can be overridden per task:
+
+```py
+@task(executor="pueue", jobs=4)
+def heavy_computation(data):
+    # This task requires 4 of the available job slots.
+    return process(data)
+```
+
+### Container wrapping
+
+The Pueue executor supports optional container wrapping. When `container_type` and `image` are configured, each command is wrapped in an `apptainer exec` (or `docker run`) invocation before being submitted to Pueue:
+
+```ini
+[executors.pueue]
+type = pueue
+scratch = /shared/scratch/redun
+container_type = apptainer
+image = /path/to/container.sif
+```
+
+This composability allows separating the concerns of job scheduling (Pueue manages the queue and resource slots) and execution environment (Apptainer provides the container).
+
+## Slurm executor
+
+The **Slurm executor** (`type = slurm`) submits tasks as batch jobs to a [Slurm](https://slurm.schedmd.com/) cluster. Jobs are submitted via `sbatch` and monitored via `sacct`. Task arguments and results are exchanged through pickle files in a shared scratch directory on a cluster-accessible filesystem (NFS, Lustre, GPFS, etc.).
+
+### Configuration
+
+At a minimum, you must configure a scratch path on the shared filesystem. See the [configuration documentation](config.md#slurm-executor) for the full list of options.
+
+```ini
+[executors.slurm]
+type = slurm
+scratch = /shared/lustre/redun_scratch
+partition = compute
+account = mylab
+time_limit = 04:00:00
+```
+
+### Resource requests
+
+Resource options (`vcpus`, `memory`, `gpus`) map to Slurm resource flags (`--cpus-per-task`, `--mem`, `--gres=gpu:N`). These can be set as defaults in the configuration and overridden per task:
+
+```py
+@task(executor="slurm", memory=64, vcpus=8, gpus=2)
+def train_model(data: File) -> File:
+    return run_training(data)
+```
+
+### Container wrapping
+
+Like the Pueue executor, the Slurm executor supports optional container wrapping. This is the typical pattern for running containerised workloads on an HPC cluster:
+
+```ini
+[executors.slurm]
+type = slurm
+scratch = /shared/lustre/redun_scratch
+partition = gpu
+container_type = apptainer
+image = /apps/containers/ml-toolkit.sif
+gpus = 1
+```
+
+### Submit scripts
+
+For each job, the executor writes a shell script to `{scratch}/jobs/{eval_hash}/submit.sh` and passes it to `sbatch`. The job name follows the pattern `redun_{eval_hash[:12]}`, making it easy to identify redun jobs in `squeue` output.
+
+## SGE executor
+
+The **SGE executor** (`type = sge`) submits tasks as batch jobs to a [Sun Grid Engine](https://en.wikipedia.org/wiki/Oracle_Grid_Engine) (SGE) cluster. Jobs are submitted via `qsub` and monitored via `qstat`. When a job disappears from `qstat` output, the executor reads its result from the shared scratch directory.
+
+### Configuration
+
+At a minimum, you must configure a scratch path on the shared filesystem. See the [configuration documentation](config.md#sge-executor) for the full list of options.
+
+```ini
+[executors.sge]
+type = sge
+scratch = /shared/nfs/redun_scratch
+queue = all.q
+parallel_environment = smp
+```
+
+### Parallel environments
+
+When `vcpus` is greater than 1 and a `parallel_environment` is configured, the executor requests multiple slots via `qsub -pe`. This is the standard SGE mechanism for multi-threaded jobs:
+
+```py
+@task(executor="sge", vcpus=8, memory=4)
+def parallel_analysis(data: File) -> File:
+    # Requests 8 slots in the "smp" PE, with 4G per slot.
+    return analyse(data)
+```
+
+### Container wrapping
+
+The SGE executor supports the same container wrapping as the other HPC executors:
+
+```ini
+[executors.sge]
+type = sge
+scratch = /shared/nfs/redun_scratch
+queue = all.q
+container_type = apptainer
+image = /path/to/container.sif
+```
+
+## Container wrapping (composability)
+
+The Pueue, Slurm, and SGE executors all support optional **container wrapping** — the ability to run each task command inside a container without needing a dedicated container executor. This is configured by adding `container_type` and `image` to any scheduler executor's configuration.
+
+Supported container types:
+
+- `apptainer` — wraps commands with `apptainer exec` (suitable for HPC, no root required)
+- `docker` — wraps commands with `docker run --rm`
+
+This design separates two orthogonal concerns:
+
+- **Job scheduling** — which queue/partition/group the job runs in, resource limits, job slots
+- **Execution environment** — which container image provides the runtime
+
+For example, the same Apptainer image can be used with different schedulers depending on the infrastructure:
+
+```ini
+# On a single server with Pueue
+[executors.local_queue]
+type = pueue
+scratch = /scratch/redun
+container_type = apptainer
+image = /apps/containers/pipeline.sif
+
+# On a Slurm cluster
+[executors.cluster]
+type = slurm
+scratch = /shared/lustre/redun_scratch
+partition = compute
+container_type = apptainer
+image = /apps/containers/pipeline.sif
+
+# Without a container (bare execution on cluster nodes)
+[executors.bare]
+type = slurm
+scratch = /shared/lustre/redun_scratch
+partition = compute
+```
