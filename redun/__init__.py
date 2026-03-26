@@ -29,6 +29,8 @@ if TYPE_CHECKING:
     from redun.executors.aws_glue import AWSGlueExecutor
     from redun.executors.docker import DockerExecutor
     from redun.executors.pueue import PueueExecutor
+    from redun.executors.sge import SGEExecutor
+    from redun.executors.slurm import SlurmExecutor
 
     try:
         from redun.executors.k8s import K8SExecutor
@@ -53,6 +55,8 @@ else:
     GCPBatchExecutor = register_executor("gcp_batch", "redun.executors.gcp_batch.GCPBatchExecutor")
     LocalExecutor = register_executor("local", "redun.executors.local.LocalExecutor")
     PueueExecutor = register_executor("pueue", "redun.executors.pueue.PueueExecutor")
+    SGEExecutor = register_executor("sge", "redun.executors.sge.SGEExecutor")
+    SlurmExecutor = register_executor("slurm", "redun.executors.slurm.SlurmExecutor")
 
 
 # Cached Schedulers.
