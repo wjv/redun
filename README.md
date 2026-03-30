@@ -2,6 +2,12 @@
 
 *yet another redundant workflow engine*
 
+> This is a fork of [redun](https://github.com/insitro/redun) that adds HPC executor support for traditional academic computing environments. Specifically, it adds executors for [Apptainer](https://apptainer.org/) containers, [Pueue](https://github.com/Nukesor/pueue) job scheduling (with job-slot resource management), [Slurm](https://slurm.schedmd.com/), and [SGE](https://en.wikipedia.org/wiki/Oracle_Grid_Engine) cluster schedulers. See `docs/source/executors.md` for usage and configuration.
+>
+> These additions are still being tested, and should not be considered production-ready yet.
+>
+> -- *Software support team at the Ancient DNA Core Unit, Max Planck Institute for Evolutionary Anthropology*
+
 **redun** aims to be a more expressive and efficient workflow framework, built on top of the popular Python programming language. It takes the somewhat contrarian view that writing dataflows directly is unnecessarily restrictive, and by doing so we lose abstractions we have come to rely on in most modern high-level languages (control flow, composability, recursion, high order functions, etc). redun's key insight is that workflows can be expressed as [lazy expressions](#whats-the-trick), which are then evaluated by a scheduler that performs automatic parallelization, caching, and data provenance logging.
 
 redun's key features are:
