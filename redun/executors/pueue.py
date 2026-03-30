@@ -17,6 +17,12 @@ Configuration example::
     job_monitor_interval = 2.0
     group = default
     jobs = 1
+
+    # Path to an alternative pueue config file. If set, passed as
+    # ``pueue --config <path>`` to all pueue CLI invocations.
+    # Useful for targeting a specific pueue daemon instance.
+    # config_path = /path/to/pueue.yml
+
     code_package = true
     code_includes = **/*.py
     code_excludes =
@@ -69,6 +75,7 @@ def pueue_add(
     jobs: int = 1,
     label: Optional[str] = None,
     working_directory: Optional[str] = None,
+    config_path: Optional[str] = None,
 ) -> int:
     """Submit a command to pueue and return the task ID.
 
@@ -84,12 +91,17 @@ def pueue_add(
         Optional label for the task.
     working_directory
         Working directory for the task.
+    config_path
+        Path to an alternative pueue config file (``--config``).
 
     Returns
     -------
     The pueue task ID (integer).
     """
-    args = ["pueue", "add", "--print-task-id"]
+    args = ["pueue"]
+    if config_path:
+        args.extend(["--config", config_path])
+    args.extend(["add", "--print-task-id"])
 
     if group:
         args.extend(["--group", group])
@@ -116,16 +128,25 @@ def pueue_add(
         raise PueueError(f"Could not parse pueue task ID from output: {output!r}")
 
 
-def pueue_status() -> dict:
+def pueue_status(config_path: Optional[str] = None) -> dict:
     """Query pueue daemon for current status.
+
+    Parameters
+    ----------
+    config_path
+        Path to an alternative pueue config file (``--config``).
 
     Returns
     -------
     Parsed JSON dict with ``tasks`` and ``groups`` keys.
     """
+    args = ["pueue"]
+    if config_path:
+        args.extend(["--config", config_path])
+    args.extend(["status", "--json"])
     try:
         output = subprocess.check_output(
-            ["pueue", "status", "--json"], stderr=subprocess.PIPE
+            args, stderr=subprocess.PIPE
         ).decode("utf8")
     except subprocess.CalledProcessError as exc:
         raise PueueError(
@@ -162,6 +183,7 @@ def get_pueue_task_status(task_info: dict) -> Optional[str]:
 
 def iter_pueue_job_status(
     pending_tasks: Dict[int, "Job"],
+    config_path: Optional[str] = None,
 ) -> Iterator[dict]:
     """Poll pueue for the status of pending tasks.
 
@@ -170,7 +192,7 @@ def iter_pueue_job_status(
     if not pending_tasks:
         return
 
-    status_data = pueue_status()
+    status_data = pueue_status(config_path=config_path)
     all_tasks = status_data.get("tasks", {})
 
     for pueue_id, redun_job in list(pending_tasks.items()):
@@ -222,6 +244,7 @@ class PueueExecutor(Executor):
         # Pueue-specific config.
         self._group = config.get("group", fallback=None)
         self._jobs = config.getint("jobs", fallback=1)
+        self._config_path = config.get("config_path", fallback=None)
 
         # Optional container wrapping.
         self._image = config.get("image", fallback=None)
@@ -303,7 +326,9 @@ class PueueExecutor(Executor):
 
         try:
             while self._is_running and self._pending_jobs:
-                for job_status in iter_pueue_job_status(self._pending_jobs):
+                for job_status in iter_pueue_job_status(
+                    self._pending_jobs, config_path=self._config_path
+                ):
                     self._process_job_status(job_status)
                 time.sleep(self._interval)
 
@@ -407,6 +432,7 @@ class PueueExecutor(Executor):
                 group=self._group,
                 jobs=jobs_slots,
                 label=label,
+                config_path=self._config_path,
             )
 
         except (PueueError, OSError) as exc:
