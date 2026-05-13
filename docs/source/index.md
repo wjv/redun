@@ -45,6 +45,13 @@ The above assumes the following dependencies are installed:
 * `gcc` (on ubuntu or similar `sudo apt-get install gcc`)
 
 ```{toctree}
+:caption: EVA fork
+:hidden:
+
+fork
+```
+
+```{toctree}
 :caption: User guide
 :hidden:
 
