@@ -61,7 +61,9 @@ class ContainerAware:
 
     # The underlying command-wrapper. Subclasses may override if they
     # need different Apptainer flags (no_home, gpu_type, extra_args).
-    _container_runner: ApptainerRunner = ApptainerRunner()
+    # Named distinctly from any pre-existing `_container_runner` attribute
+    # on host executors to avoid attribute-shadowing collisions.
+    _apptainer_runner: ApptainerRunner = ApptainerRunner()
 
     def _load_container_config(self, config: Optional[SectionProxy]) -> None:
         """Populate executor-level defaults from a config section.
@@ -126,7 +128,7 @@ class ContainerAware:
         volumes = sorted(_parse_bind(b) for b in binds)
         env = {k: os.environ[k] for k in sorted(set(env_keys)) if k in os.environ}
 
-        return self._container_runner.wrap_command(
+        return self._apptainer_runner.wrap_command(
             list(cmd), image=image, volumes=volumes, env=env
         )
 

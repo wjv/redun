@@ -347,8 +347,22 @@ class Task(Value, Generic[P, R]):
             raise ValueError(
                 f"Task '{self.fullname}' sets executor='inline' but also "
                 f"specifies container=. InlineExecutor runs in-process; "
-                f"container wrapping is not applicable. Use executor='local' "
+                f"container wrapping is not applicable. Use executor='pueue' "
                 f"(or another host executor) to combine with a container."
+            )
+
+        # `executor='local'` + container is deferred — in theory the
+        # orthogonality model promises it, but this fork's production
+        # workflow uses `executor='pueue'` for everything containerised.
+        # Surface the gap clearly rather than silently dropping the option.
+        if (
+            self.get_task_option("executor") == "local"
+            and self.get_task_option("container") is not None
+        ):
+            raise NotImplementedError(
+                f"Task '{self.fullname}' sets executor='local' with "
+                f"container=. This combination is deferred in the EVA fork; "
+                f"use executor='pueue' (with the same container=) for now."
             )
 
         # Validate async tasks.

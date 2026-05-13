@@ -98,12 +98,13 @@ def test_inline_without_container_is_fine() -> None:
 
 
 @pytest.mark.unit
-def test_local_with_container_is_fine() -> None:
-    @task(executor="local", container="img.sif")
-    def _t() -> int:
-        return 1
+def test_local_with_container_is_deferred() -> None:
+    """`executor='local'` + container= is deferred in the EVA fork; raise."""
+    with pytest.raises(NotImplementedError, match="executor='local'.*container"):
 
-    assert _t.get_task_option("container") == "img.sif"
+        @task(executor="local", container="img.sif")
+        def _t() -> int:
+            return 1
 
 
 # ---------------------------------------------------------------------------
