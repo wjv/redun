@@ -259,60 +259,19 @@ The **k8s executor** executes tasks as jobs on a [Kubernetes](https://kubernetes
 
 Note: The k8s executor is new executor provided as a beta release. If you experience an issues, please report them to help improve the implementation.
 
-## Apptainer executor
+## Apptainer (retired — use `container=` instead)
 
-The **Apptainer executor** (`type = apptainer`) executes tasks inside [Apptainer](https://apptainer.org/) (formerly Singularity) containers. Apptainer is the standard container runtime in HPC environments — it runs unprivileged (no root or daemon required) and uses SIF image files.
-
-Unlike the Docker executor, Apptainer has no background daemon. Each job is launched as a foreground `apptainer exec` subprocess, and the executor tracks completion by polling the process status.
-
-### Configuration
-
-At a minimum, you must configure an image and a scratch path. See the [configuration documentation](config.md#apptainer-executor) for the full list of options.
-
-```ini
-[executors.apptainer]
-type = apptainer
-image = /path/to/container.sif
-scratch = /shared/scratch/redun
-```
-
-### Images
-
-The `image` option accepts any reference that `apptainer exec` understands:
-
-- A local SIF file: `/path/to/container.sif`
-- A Docker registry URI: `docker://ubuntu:22.04`
-- An Apptainer library URI: `library://user/collection/container:tag`
-
-### Bind mounts
-
-Apptainer bind mounts use the `volumes` option (same JSON format as the Docker executor). The scratch directory is always mounted automatically at the same path inside the container.
-
-```ini
-volumes = [["/data/reference", "/data/reference"], ["/tmp", "/tmp"]]
-```
-
-### GPU support
-
-Set `gpus` to a non-zero value to enable GPU passthrough. By default, this uses the `--nv` flag for NVIDIA GPUs. For AMD GPUs, set `gpu_type = rocm`.
-
-### Code packaging
-
-Code packaging works the same way as for the [Docker](#docker-executor) and [AWS Batch](#aws-batch-executor) executors. By default, all `**/*.py` files are packaged into a tar file in the scratch directory and extracted inside the container before task execution.
-
-### Usage example
+The standalone **Apptainer executor** has been retired in the EVA fork. Containerisation is now a task-level option, orthogonal to the choice of host executor:
 
 ```py
-@task(executor="apptainer")
+@task(executor="pueue", container="my_image.sif")
 def align_reads(sample: str, reference: File) -> File:
-    # This runs inside the Apptainer container.
     return run_alignment(sample, reference)
-
-@task(executor="apptainer", memory=32, gpus=1)
-def call_variants(aligned: File) -> File:
-    # Override resource defaults per task.
-    return run_variant_caller(aligned)
 ```
+
+The `container=` option works on any host executor that inherits `ContainerAware` (currently `pueue`; SGE and Slurm to follow). Bind mounts and environment passthrough are configured per task with `binds=[...]` and `passthrough_env=[...]`, or as executor-level defaults (`default_container`, `default_bind`, `default_passthrough_env`) in `redun.ini`.
+
+Using `executor="apptainer"` raises an error pointing to this migration path.
 
 ## Pueue executor
 
