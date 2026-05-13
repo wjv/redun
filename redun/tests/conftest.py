@@ -181,6 +181,7 @@ def redun_scheduler() -> Iterator[Scheduler]:
         {
             "scheduler": {"ignore_warnings": "namespace"},
             "backend": {"db_uri": "sqlite:///:memory:", "automigrate": "True"},
+            "executors.inline": {"type": "inline"},
         }
     )
     scheduler = Scheduler(config=config)
