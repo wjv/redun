@@ -208,6 +208,20 @@ def tmp_workspace(tmp_path):
 
 
 @pytest.fixture
+def minimal_workflow():
+    """The trivial workflow under ``redun/tests/fixtures/minimal_workflow.py``.
+
+    Imports lazily so that the workflow module is registered with redun
+    only when a test actually uses it. The module's tasks live under the
+    ``redun.*`` namespace, so the ``redun_globals`` autouse fixture
+    preserves them across tests.
+    """
+    from redun.tests.fixtures import minimal_workflow as wf
+
+    return wf
+
+
+@pytest.fixture
 def pg_container(request):
     """
     A containerised PostgreSQL instance via testcontainers.
