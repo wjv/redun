@@ -47,6 +47,7 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple
 from redun.executors.base import Executor, register_executor
 from redun.executors.code_packaging import package_code, parse_code_package_config
 from redun.executors.command import get_oneshot_command, get_script_task_command
+from redun.executors.container_aware import ContainerAware
 from redun.executors.container import ContainerRunner, get_container_runner
 from redun.executors.scratch import (
     SCRATCH_OUTPUT,
@@ -217,12 +218,19 @@ def iter_pueue_job_status(
 
 
 @register_executor("pueue")
-class PueueExecutor(Executor):
+class PueueExecutor(ContainerAware, Executor):
     """Executor for submitting jobs to a Pueue daemon.
 
     Jobs are submitted via the ``pueue`` CLI and monitored by polling
     ``pueue status --json``. Task arguments and results are exchanged
     through pickle files in a shared scratch directory.
+
+    Through :class:`ContainerAware`, supports per-task Apptainer container
+    wrapping via the ``container``, ``binds``, and ``passthrough_env`` task
+    options, with executor-level defaults from ``default_container``,
+    ``default_bind``, and ``default_passthrough_env`` in the config. The
+    pre-existing ``container_type``/``image`` config keys are still
+    honoured as a fallback when no task-level container is resolved.
     """
 
     def __init__(
@@ -235,6 +243,7 @@ class PueueExecutor(Executor):
         if config is None:
             raise ValueError("PueueExecutor requires config.")
         self._config = config
+        self._load_container_config(config)
 
         # Required config.
         self._scratch_prefix_rel = config["scratch"]
@@ -386,8 +395,12 @@ class PueueExecutor(Executor):
                 as_mount=True,
             )
 
-        # Optionally wrap in a container.
-        if self._container_runner and self._image:
+        # Container wrapping: task-level options (via ContainerAware) take
+        # precedence over the legacy executor-level container_runner/image
+        # config. If neither is set, the command runs natively.
+        if self._resolve_container(job_options) is not None:
+            command = self._wrap_command_for_container(command, job_options)
+        elif self._container_runner and self._image:
             volumes = job_options.get("volumes", []) + [
                 (self._scratch_prefix, self._scratch_prefix)
             ]
@@ -401,6 +414,18 @@ class PueueExecutor(Executor):
             )
 
         return command
+
+    def _wrap_command_for_container(
+        self, cmd: List[str], task_options: dict
+    ) -> List[str]:
+        """Wrap with Apptainer, ensuring the scratch dir is bind-mounted.
+
+        Without the scratch bind, the containerised ``redun oneshot`` (or
+        script task) cannot read its input or write its output.
+        """
+        binds = self._resolve_binds(task_options) + [self._scratch_prefix]
+        augmented = {**task_options, "binds": binds}
+        return super()._wrap_command_for_container(cmd, augmented)
 
     def _submit(self, job: Job) -> None:
         """Submit a Job to the Pueue executor."""

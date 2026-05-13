@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     from redun.executors.aws_batch import AWSBatchExecutor
     from redun.executors.aws_glue import AWSGlueExecutor
     from redun.executors.docker import DockerExecutor
+    from redun.executors.inline import InlineExecutor
     from redun.executors.pueue import PueueExecutor
     from redun.executors.sge import SGEExecutor
     from redun.executors.slurm import SlurmExecutor
@@ -51,6 +52,7 @@ else:
     AWSBatchExecutor = register_executor("aws_batch", "redun.executors.aws_batch.AWSBatchExecutor")
     AWSGlueExecutor = register_executor("aws_glue", "redun.executors.aws_glue.AWSGlueExecutor")
     DockerExecutor = register_executor("docker", "redun.executors.docker.DockerExecutor")
+    InlineExecutor = register_executor("inline", "redun.executors.inline.InlineExecutor")
     K8SExecutor = register_executor("k8s", "redun.executors.k8s.K8SExecutor")
     GCPBatchExecutor = register_executor("gcp_batch", "redun.executors.gcp_batch.GCPBatchExecutor")
     LocalExecutor = register_executor("local", "redun.executors.local.LocalExecutor")

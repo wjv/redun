@@ -792,55 +792,17 @@ Maximum number (default: 1000) of equivalent tasks that will be submitted togeth
 
 A float (default: 3.0) that specifies the maximum time, in seconds, jobs will wait before submission to be possibly bundled into an array job.
 
-#### Apptainer executor
+#### Apptainer executor (retired)
 
-The [Apptainer executor](executors.md#apptainer-executor) (`type = apptainer`) executes tasks inside Apptainer (formerly Singularity) containers on the local machine.
+The standalone Apptainer executor has been retired. Use [`container=` as a task option](executors.md#apptainer-retired--use-container-instead) on a host executor (e.g. Pueue) that inherits `ContainerAware`.
 
-##### `image`
+Host executors that support container wrapping accept the following config keys for executor-level defaults:
 
-A string that specifies the container image. Accepts a local SIF file path, a Docker registry URI (`docker://`), or an Apptainer library URI (`library://`). This can be overridden on a per task basis using task options.
+- `default_container` — image used when a task doesn't specify `container=`.
+- `default_bind` — comma-separated list of bind specifications (`/host` or `/host:/container`).
+- `default_passthrough_env` — comma-separated list of environment variable names exposed inside the container.
 
-##### `scratch`
-
-A string that specifies the scratch path used to communicate with the container. The scratch directory is bind-mounted at the same absolute path inside the container. If the path is relative, it is interpreted relative to the redun configuration directory.
-
-##### `vcpus`
-
-An integer (default: 1) that specifies the default number of virtual CPUs. This can be overridden on a per task basis using task options.
-
-##### `gpus`
-
-An integer (default: 0) that specifies the default number of GPUs. When non-zero, enables GPU passthrough via `--nv` (NVIDIA) or `--rocm` (AMD). This can be overridden on a per task basis using task options.
-
-##### `memory`
-
-An integer (default: 4) that specifies the default amount of memory in GB. This can be overridden on a per task basis using task options.
-
-##### `no_home`
-
-A bool (default: True) that specifies whether to pass `--no-home` to Apptainer, preventing the user's home directory from being mounted inside the container. Recommended for reproducibility.
-
-##### `gpu_type`
-
-A string (default: `nvidia`) that specifies the GPU type for passthrough. Set to `rocm` for AMD GPUs.
-
-##### `extra_args`
-
-A string (default: empty) of additional space-separated arguments to pass to `apptainer exec`. For example, `--cleanenv --writable-tmpfs`.
-
-##### `volumes`
-
-A JSON list of pairs that specifies bind mounts. Each pair is a host and container path. The scratch directory is always mounted automatically.
-
-```ini
-volumes = [["/data/reference", "/data/reference"], ["/tmp", "/tmp"]]
-```
-
-If host paths are relative, they are assumed relative to the configuration directory.
-
-##### `job_monitor_interval`
-
-A float (default: 0.5) that specifies how often, in seconds, to poll running processes for completion.
+Task-level options (`container=`, `binds=[...]`, `passthrough_env=[...]`) override these defaults.
 
 ##### `code_package`
 

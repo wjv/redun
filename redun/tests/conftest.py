@@ -169,6 +169,82 @@ def session(backend: RedunBackendDb) -> Session:
     return backend.session
 
 
+@pytest.fixture
+def redun_scheduler() -> Iterator[Scheduler]:
+    """
+    Hermetic Scheduler with an in-memory SQLite backend.
+
+    Use this when a test needs a real scheduler but must not touch any
+    persistent or shared state. Each test gets a fresh database.
+    """
+    config = Config(
+        {
+            "scheduler": {"ignore_warnings": "namespace"},
+            "backend": {"db_uri": "sqlite:///:memory:", "automigrate": "True"},
+            "executors.inline": {"type": "inline"},
+        }
+    )
+    scheduler = Scheduler(config=config)
+    scheduler.load()
+    try:
+        yield scheduler
+    finally:
+        backend = cast(RedunBackendDb, scheduler.backend)
+        if backend.session:
+            backend.session.close()
+        if backend.engine:
+            backend.engine.dispose()
+
+
+@pytest.fixture
+def tmp_workspace(tmp_path):
+    """
+    Per-test temporary directory.
+
+    Thin alias for pytest's built-in ``tmp_path``; kept for naming symmetry
+    with the test scaffolding spec.
+    """
+    return tmp_path
+
+
+@pytest.fixture
+def minimal_workflow():
+    """The trivial workflow under ``redun/tests/fixtures/minimal_workflow.py``.
+
+    Imports lazily so that the workflow module is registered with redun
+    only when a test actually uses it. The module's tasks live under the
+    ``redun.*`` namespace, so the ``redun_globals`` autouse fixture
+    preserves them across tests.
+    """
+    from redun.tests.fixtures import minimal_workflow as wf
+
+    return wf
+
+
+@pytest.fixture
+def pg_container(request):
+    """
+    A containerised PostgreSQL instance via testcontainers.
+
+    Only the rare test that needs Postgres semantics should use this. Tests
+    that use this fixture must be marked ``@pytest.mark.docker`` so they are
+    skipped on hosts without Docker.
+
+    See ``redun/tests/README.md`` for the testcontainers escape-hatch
+    rationale and a pointer to the working reference in ``pg-http-proxy``.
+    """
+    try:
+        from testcontainers.postgres import PostgresContainer
+    except ImportError:
+        pytest.skip("testcontainers not installed")
+
+    try:
+        with PostgresContainer("postgres:16") as pg:
+            yield pg
+    except Exception as e:
+        pytest.skip(f"Docker unavailable for pg_container: {e}")
+
+
 @pytest.fixture(autouse=True)
 def redun_globals(request):
     """

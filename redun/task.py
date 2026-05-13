@@ -318,6 +318,53 @@ class Task(Value, Generic[P, R]):
         if "prov" in self._task_options_base or "prov" in self._task_options_override:
             self._export_options.add("prov")
 
+        # Validate orthogonality-refactor task options (`container`, `binds`,
+        # `passthrough_env`). See the orthogonality handover spec §4.2 and §5.2.
+        for opts in (self._task_options_base, self._task_options_override):
+            container_value = opts.get("container", None)
+            if container_value is not None and not isinstance(container_value, str):
+                raise TypeError(
+                    f"Task option `container` must be a str or None, "
+                    f"got {type(container_value).__name__}"
+                )
+            for list_key in ("binds", "passthrough_env"):
+                value = opts.get(list_key, None)
+                if value is None:
+                    continue
+                if not isinstance(value, list) or not all(
+                    isinstance(item, str) for item in value
+                ):
+                    raise TypeError(
+                        f"Task option `{list_key}` must be a list of str or None, "
+                        f"got {value!r}"
+                    )
+
+        # InlineExecutor runs in-process; container wrapping is not applicable.
+        if (
+            self.get_task_option("executor") == "inline"
+            and self.get_task_option("container") is not None
+        ):
+            raise ValueError(
+                f"Task '{self.fullname}' sets executor='inline' but also "
+                f"specifies container=. InlineExecutor runs in-process; "
+                f"container wrapping is not applicable. Use executor='pueue' "
+                f"(or another host executor) to combine with a container."
+            )
+
+        # `executor='local'` + container is deferred — in theory the
+        # orthogonality model promises it, but this fork's production
+        # workflow uses `executor='pueue'` for everything containerised.
+        # Surface the gap clearly rather than silently dropping the option.
+        if (
+            self.get_task_option("executor") == "local"
+            and self.get_task_option("container") is not None
+        ):
+            raise NotImplementedError(
+                f"Task '{self.fullname}' sets executor='local' with "
+                f"container=. This combination is deferred in the EVA fork; "
+                f"use executor='pueue' (with the same container=) for now."
+            )
+
         # Validate async tasks.
         if self.is_async():
             options_dict = self.get_task_options()
@@ -438,10 +485,31 @@ class Task(Value, Generic[P, R]):
         if self.compat:
             return self.compat[0]
 
+        # `container` (the image path) factors into the hash even when set
+        # only as a base option: running the same code in a different image
+        # can produce different output, so changing the image must invalidate
+        # the cache for downstream tasks (handover spec §4.3).
+        container_option = self.get_task_option("container")
+        container_hash = ["container", container_option] if container_option else []
+
         # Note, we specifically do not hash `_task_options_base` since they are
-        # not allowed to impact the results of computation.
+        # not allowed to impact the results of computation. The exception is
+        # `container`, handled above.
+        #
+        # `binds` and `passthrough_env` are excluded from the override hash:
+        # they affect which paths and env vars the container can reach, not
+        # the logic of the code, and they would otherwise invalidate caches
+        # across hosts with the same data laid out differently (handover §4.3).
         if self._task_options_override:
-            task_options_hash = [get_type_registry().get_hash(self._task_options_override)]
+            hashable_override = {
+                k: v
+                for k, v in self._task_options_override.items()
+                if k not in ("container", "binds", "passthrough_env")
+            }
+            if hashable_override:
+                task_options_hash = [get_type_registry().get_hash(hashable_override)]
+            else:
+                task_options_hash = []
         else:
             task_options_hash = []
 
@@ -457,13 +525,17 @@ class Task(Value, Generic[P, R]):
             else:
                 source = get_func_source(self.func)
             return hash_struct(
-                ["Task", self.fullname, "source", source] + hash_includes_hash + task_options_hash
+                ["Task", self.fullname, "source", source]
+                + hash_includes_hash
+                + task_options_hash
+                + container_hash
             )
         else:
             return hash_struct(
                 ["Task", self.fullname, "version", self.version]
                 + hash_includes_hash
                 + task_options_hash
+                + container_hash
             )
 
     def __getstate__(self) -> dict:
