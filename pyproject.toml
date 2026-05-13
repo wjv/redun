@@ -178,6 +178,12 @@ include = ["redun/executors/k8s.py"]
 possibly-missing-attribute = "warn"
 
 [tool.pytest.ini_options]
+markers = [
+    "unit: pure-Python tests with no scheduler or I/O (task.func calls, helpers).",
+    "graph: builds a redun expression tree without executing it; asserts on shape.",
+    "smoke: invokes the scheduler against tiny fixtures with an in-memory SQLite backend.",
+    "docker: requires a working Docker daemon (testcontainers, etc.); skipped if unavailable.",
+]
 filterwarnings = [
     "error::pytest.PytestUnhandledThreadExceptionWarning",
     # boto and moto inherited warnings.
