@@ -1538,7 +1538,7 @@ class RedunBackendDb(RedunBackend):
         self.logger = logger or _logger
 
         self.db_uri: str = RedunBackendDb._get_uri(db_uri, config)
-        self.connect_args = {}
+        self.connect_args: Dict[str, Any] = {}
         if self.db_uri.startswith("sqlite:///"):
             self.connect_args["check_same_thread"] = False
             default_automigrate = "True"
@@ -1546,6 +1546,21 @@ class RedunBackendDb(RedunBackend):
             default_automigrate = "False"
 
         self.automigrate = str2bool(config.get("automigrate", default_automigrate))
+
+        # Optional same-database schema-scoped deployment (Postgres only).
+        # When set, every unqualified DDL/DML from the ORM and from Alembic
+        # resolves into this schema via a single-entry search_path — no
+        # `public` fallback, so a misconfigured run errors rather than
+        # silently writing into the wrong schema. See
+        # `.claude/redun-schema-scoped-deployment.md`.
+        self.db_schema: str | None = config.get("db_schema") or None
+        if self.db_schema:
+            if self.db_uri.startswith("sqlite:///"):
+                raise RedunDatabaseError(
+                    "db_schema is only meaningful for Postgres backends; "
+                    "remove it or switch to a postgresql:// db_uri."
+                )
+            self.connect_args["options"] = f"-csearch_path={self.db_schema}"
 
         self.engine: Engine | None = None
         self.session: Session | None = None
@@ -1621,6 +1636,28 @@ class RedunBackendDb(RedunBackend):
                 cursor.close()
 
         return self.engine
+
+    def _assert_search_path(self) -> None:
+        """
+        When ``db_schema`` is configured, verify the live connection's
+        ``current_schema()`` matches it. Belt-and-braces tripwire against
+        env-var or session-state surprises that could route writes outside
+        the intended schema. The DB-level role grants remain the
+        load-bearing defence; this check just fails loud and early.
+        """
+        if not self.db_schema:
+            return
+        assert self.engine
+        if self.engine.dialect.name != "postgresql":
+            return
+        with self.engine.connect() as conn:
+            actual = conn.execute(sa.text("SELECT current_schema()")).scalar()
+        if actual != self.db_schema:
+            raise RedunDatabaseError(
+                f"Configured db_schema={self.db_schema!r} but the connection's "
+                f"current_schema() is {actual!r}. Refusing to proceed; redun "
+                f"would write into the wrong schema."
+            )
 
     @contextmanager
     def _acquire(self) -> Any:
@@ -1785,6 +1822,7 @@ class RedunBackendDb(RedunBackend):
             migration after establishing database connection.
         """
         self.create_engine()
+        self._assert_search_path()
         if migrate is None:
             migrate = self.automigrate
         if migrate:

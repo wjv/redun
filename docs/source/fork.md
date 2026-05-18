@@ -114,6 +114,23 @@ The `default_*` keys are read by `ContainerAware` and provide fallbacks when a t
 
 Legacy back-compat: the older `container_type = apptainer` / `image = X.sif` config is still honoured for pueue, but only when no task-level `container=` is resolved.
 
+### Same-database schema-scoped deployment (Postgres)
+
+If you want redun's call-graph DB to share a Postgres database with another application, use a `[backend] db_schema` key:
+
+```ini
+[backend]
+db_uri = postgresql://redun_user@dbhost/shared_db
+db_schema = redun
+automigrate = False
+```
+
+Redun then sets a single-entry `search_path` on every connection, so all unqualified DDL/DML (including Alembic's `alembic_version` table) resolves into `redun.*`. A startup assertion checks `current_schema()` matches and fails loud if it doesn't.
+
+This is a *convenience and tripwire*. The load-bearing defence is the DB-level role grant — give `redun_user` `USAGE, CREATE` on `redun` only, and `REVOKE ALL ON SCHEMA public` (plus any other application schemas in the same database).
+
+`db_schema` is Postgres-only — it raises on SQLite backends.
+
 ---
 
 ## What was retired
@@ -199,7 +216,7 @@ For pipeline-side tests, prefer `executor="inline"` in test workflows — no pue
 
 ## Deferred / TODO
 
-- **`executor="local"` + `container=`** is not implemented yet. Raises `NotImplementedError` at task-definition time. Workaround: use `executor="pueue"` (with the same `container=` value). Tracking: see `.claude/redun-orthogonality-implementation-plan.md`.
+- **`executor="local"` + `container=`** is not implemented yet. Raises `NotImplementedError` at task-definition time. Workaround: use `executor="pueue"` (with the same `container=` value).
 - **`ContainerAware` not yet applied to SGE / Slurm executors.** When you actually want containerised tasks on those, expect a small mixin-application change.
 
 ---
@@ -207,8 +224,6 @@ For pipeline-side tests, prefer `executor="inline"` in test workflows — no pue
 ## Pointers
 
 - Upstream redun design overview: <https://insitro.github.io/redun/design.html>
-- Architectural rationale for this fork's choices: `.claude/redun-design-comparison.md`
-- The orthogonality refactor design spec: `.claude/redun-orthogonality-and-testability-handover.md`
 - Test conventions: `redun/tests/README.md`
 - Executor config reference: [`config.md`](config.md)
 - Executor reference (legacy + retired): [`executors.md`](executors.md)
