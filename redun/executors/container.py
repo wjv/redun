@@ -137,13 +137,24 @@ class DockerRunner:
         if gpus and gpus > 0:
             args.extend(["--gpus", "all"])
 
+        # Bypass the image's ENTRYPOINT and invoke the requested binary
+        # directly. Apptainer's ``exec`` already does this; injecting
+        # ``--entrypoint`` here makes Docker behave consistently. Without
+        # this, an image with ``ENTRYPOINT=["foo"]`` would receive the
+        # requested command as args to foo (often nonsensically).
+        # Placed before ``extra_args`` so a user can still override via
+        # ``extra_container_args = --entrypoint <X>`` — Docker honours
+        # the last ``--entrypoint`` flag.
+        if command:
+            args.extend(["--entrypoint", command[0]])
+
         args.extend(self.extra_args)
         # Accept Apptainer-style `docker://...` references for cross-runtime
         # portability — Docker rejects the prefix as "invalid reference
         # format"; Apptainer reads it natively. Stripping here keeps the
         # task-level `container=` string portable across hosts.
         args.append(image.removeprefix("docker://"))
-        args.extend(command)
+        args.extend(command[1:])
         return args
 
 

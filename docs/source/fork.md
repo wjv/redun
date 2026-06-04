@@ -134,7 +134,9 @@ Valid values: `apptainer` (default if the key is absent) and `docker`. Apptainer
 
 The runtime choice does **not** affect the cache hash. Same image string + same runtime-independent task arguments → cache hit, regardless of which host (and which container runtime) produced the result.
 
-Container image strings work across both runtimes: `docker://registry/name:tag` references are read natively by Apptainer (which pulls and runs), and by Docker (as a normal registry ref); local Apptainer SIF paths (`/path/to/img.sif`) are Apptainer-only.
+Container image strings work across both runtimes: `docker://registry/name:tag` references are read natively by Apptainer (which pulls and runs), and by Docker (as a normal registry ref — the `docker://` prefix is stripped before invocation); local Apptainer SIF paths (`/path/to/img.sif`) are Apptainer-only.
+
+**Image ENTRYPOINTs are bypassed on both runtimes.** Pass the full command including the executable name (e.g. `script(["bcl2fastq", "--runfolder", ...], container="docker://mpieva/bcl2fastq:2.20")`). Apptainer's `exec` ignores ENTRYPOINTs by default; the fork injects `--entrypoint <command[0]>` on `docker run` so Docker matches that behaviour. An image declared `ENTRYPOINT=["bcl2fastq"]` therefore runs the same way on both. Users who genuinely want a different entrypoint can override per-executor via `extra_container_args = --entrypoint <X>` (Docker honours the last `--entrypoint` flag).
 
 Legacy back-compat: the older single-image-per-executor pattern (`container_type` + `image = X.sif` set on the executor, no task-level `container=`) is still honoured.
 

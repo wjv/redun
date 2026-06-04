@@ -79,10 +79,13 @@ class TestDockerRunner:
     def test_basic_command(self) -> None:
         runner = DockerRunner()
         result = runner.wrap_command(["echo", "hello"], image="my-image:latest")
+        # `--entrypoint echo` bypasses any image-declared ENTRYPOINT;
+        # remaining args follow the image positionally per Docker convention.
         assert result == [
             "docker", "run", "--rm",
+            "--entrypoint", "echo",
             "my-image:latest",
-            "echo", "hello",
+            "hello",
         ]
 
     def test_volumes(self) -> None:
@@ -130,6 +133,41 @@ class TestDockerRunner:
         runner = DockerRunner()
         result = runner.wrap_command(["cmd"], image="my-image:tag")
         assert "my-image:tag" in result
+
+    def test_overrides_image_entrypoint(self) -> None:
+        """`--entrypoint command[0]` aligns Docker with Apptainer's exec semantics.
+
+        An ENTRYPOINT-bearing image like the Q3 bcl2fastq one would otherwise
+        prepend its declared entrypoint binary to the redun-supplied command,
+        producing nonsense like ``bcl2fastq bash -c …``.
+        """
+        runner = DockerRunner()
+        result = runner.wrap_command(["bash", "-c", "echo hi"], image="some:image")
+        # --entrypoint sits before the image; the rest of the command follows
+        # the image positionally.
+        assert "--entrypoint" in result
+        ep_idx = result.index("--entrypoint")
+        assert result[ep_idx + 1] == "bash"
+        img_idx = result.index("some:image")
+        assert ep_idx < img_idx
+        # First arg word ("bash") must NOT also appear as a positional after the
+        # image — that would mean we're double-passing it.
+        assert result[img_idx + 1 :] == ["-c", "echo hi"]
+
+    def test_extra_args_can_override_entrypoint(self) -> None:
+        """User's ``extra_container_args = --entrypoint X`` still wins.
+
+        ``extra_args`` are appended *after* the auto-injected ``--entrypoint``,
+        and Docker honours the last ``--entrypoint`` flag — so the existing
+        escape hatch for users who deliberately want a different entrypoint
+        survives the auto-injection.
+        """
+        runner = DockerRunner(extra_args=["--entrypoint", "/bin/sh"])
+        result = runner.wrap_command(["bash", "-c", "x"], image="img")
+        # Both --entrypoint flags appear; the later (user's) one wins per Docker.
+        ep_indices = [i for i, a in enumerate(result) if a == "--entrypoint"]
+        assert len(ep_indices) == 2
+        assert result[ep_indices[-1] + 1] == "/bin/sh"
 
 
 class TestGetContainerRunner:
