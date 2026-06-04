@@ -138,7 +138,11 @@ class DockerRunner:
             args.extend(["--gpus", "all"])
 
         args.extend(self.extra_args)
-        args.append(image)
+        # Accept Apptainer-style `docker://...` references for cross-runtime
+        # portability — Docker rejects the prefix as "invalid reference
+        # format"; Apptainer reads it natively. Stripping here keeps the
+        # task-level `container=` string portable across hosts.
+        args.append(image.removeprefix("docker://"))
         args.extend(command)
         return args
 

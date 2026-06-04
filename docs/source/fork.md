@@ -138,6 +138,12 @@ Container image strings work across both runtimes: `docker://registry/name:tag` 
 
 Legacy back-compat: the older single-image-per-executor pattern (`container_type` + `image = X.sif` set on the executor, no task-level `container=`) is still honoured.
 
+### Image requirements for script tasks
+
+If your task uses `script()` or `@task(script=True)`, redun wraps the command in `bash -c -o pipefail '…'`. **The container image must therefore have `bash` on its PATH** — minimal Alpine-based images that ship only `busybox`/`sh` will fail at startup with a "bash: not found" or similar. Pick a base image that includes bash (e.g. `debian:stable-slim`, `ubuntu:24.04`, or any of the standard scientific Python/R images).
+
+Regular `@task` definitions without `script=True` don't have this requirement — they run `redun oneshot …` (Python) inside the container, not a shell wrapper.
+
 ### Same-database schema-scoped deployment (Postgres)
 
 If you want redun's call-graph DB to share a Postgres database with another application, use a `[backend] db_schema` key:

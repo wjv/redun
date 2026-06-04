@@ -118,6 +118,19 @@ class TestDockerRunner:
         assert "-e" in result
         assert "KEY=val" in result
 
+    def test_strips_docker_prefix(self) -> None:
+        """`docker://...` refs are accepted (Apptainer-style cross-runtime portability)."""
+        runner = DockerRunner()
+        result = runner.wrap_command(["cmd"], image="docker://my-image:tag")
+        assert "docker://my-image:tag" not in result
+        assert "my-image:tag" in result
+
+    def test_passes_bare_ref_unchanged(self) -> None:
+        """Bare refs without the prefix pass through verbatim."""
+        runner = DockerRunner()
+        result = runner.wrap_command(["cmd"], image="my-image:tag")
+        assert "my-image:tag" in result
+
 
 class TestGetContainerRunner:
     def test_no_container_type(self) -> None:
