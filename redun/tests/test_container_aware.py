@@ -154,3 +154,47 @@ def test_wrap_command_is_deterministic_across_calls() -> None:
     first = inst._wrap_command_for_container(["x"], options)
     second = inst._wrap_command_for_container(["x"], options)
     assert first == second
+
+
+# ---------------------------------------------------------------------------
+# container_type — runtime selection (apptainer vs docker)
+
+
+@pytest.mark.unit
+def test_container_runtime_defaults_to_apptainer() -> None:
+    """No ``container_type`` configured → Apptainer (preserves prior behaviour)."""
+    from redun.executors.container import ApptainerRunner
+
+    inst = _instance(default_container="img.sif")
+    assert isinstance(inst._container_runtime, ApptainerRunner)
+
+
+@pytest.mark.unit
+def test_container_runtime_apptainer_explicit() -> None:
+    """``container_type = apptainer`` → ``ApptainerRunner``, honours ``no_home``."""
+    from redun.executors.container import ApptainerRunner
+
+    inst = _instance(container_type="apptainer", no_home="false")
+    assert isinstance(inst._container_runtime, ApptainerRunner)
+    assert inst._container_runtime.no_home is False
+
+
+@pytest.mark.unit
+def test_container_runtime_docker_when_configured() -> None:
+    """``container_type = docker`` → ``DockerRunner``; wrap produces ``docker run``."""
+    from redun.executors.container import DockerRunner
+
+    inst = _instance(container_type="docker", default_container="img:tag")
+    assert isinstance(inst._container_runtime, DockerRunner)
+
+    wrapped = inst._wrap_command_for_container(["echo", "hi"], {})
+    assert wrapped[0] == "docker"
+    assert "img:tag" in wrapped
+    assert "echo" in wrapped and "hi" in wrapped
+
+
+@pytest.mark.unit
+def test_container_runtime_unknown_raises() -> None:
+    """Unknown ``container_type`` value surfaces a clear error."""
+    with pytest.raises(ValueError, match="Unknown container_type"):
+        _instance(container_type="podman")

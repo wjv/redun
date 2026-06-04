@@ -112,7 +112,31 @@ type = inline
 
 The `default_*` keys are read by `ContainerAware` and provide fallbacks when a task doesn't specify the option directly. Per-task options always override.
 
-Legacy back-compat: the older `container_type = apptainer` / `image = X.sif` config is still honoured for pueue, but only when no task-level `container=` is resolved.
+### Selecting a container runtime: `container_type`
+
+The runtime that runs your container — Apptainer or Docker — is a *host-environment* concern, not a task concern. The same `@task(container="X")` declaration runs unchanged across hosts; the host's executor config picks the local runtime via the `container_type` key:
+
+```ini
+# Mac dev box: Docker
+[executors.pueue]
+type = pueue
+container_type = docker
+scratch = .redun_scratch
+
+# HPC server: Apptainer
+[executors.pueue]
+type = pueue
+container_type = apptainer
+scratch = /raid01/scratch/redun
+```
+
+Valid values: `apptainer` (default if the key is absent) and `docker`. Apptainer additionally honours `no_home`, `gpu_type`, and `extra_container_args` keys for runner tuning.
+
+The runtime choice does **not** affect the cache hash. Same image string + same runtime-independent task arguments → cache hit, regardless of which host (and which container runtime) produced the result.
+
+Container image strings work across both runtimes: `docker://registry/name:tag` references are read natively by Apptainer (which pulls and runs), and by Docker (as a normal registry ref); local Apptainer SIF paths (`/path/to/img.sif`) are Apptainer-only.
+
+Legacy back-compat: the older single-image-per-executor pattern (`container_type` + `image = X.sif` set on the executor, no task-level `container=`) is still honoured.
 
 ### Same-database schema-scoped deployment (Postgres)
 
