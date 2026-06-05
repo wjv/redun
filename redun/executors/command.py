@@ -130,6 +130,14 @@ def get_script_task_command(
             None, status_path, as_mount=as_mount
         )
 
+    # Capture the inner pipeline's exit code via ${PIPESTATUS[0]} and
+    # re-exit with it at the end so failures propagate. The old
+    # ``(A) && (B) || (C)`` structure caused C's exit (always 0 from
+    # successful cleanup) to dominate when A failed, silently masking
+    # script-task failures. The per-job ``status`` file was correctly
+    # written as "fail", but the surrounding process exited 0 and the
+    # executor's monitor (e.g. pueue) saw success. See back-channel
+    # q4-to-redun.md 2026-06-05 for the end-to-end reproduction.
     return [
         "bash",
         "-c",
@@ -138,18 +146,18 @@ def get_script_task_command(
         f"""
 {input_stage}
 chmod +x .task_command
-(
-  ./.task_command \
-  2> >(tee .task_error >&2) | tee .task_output
-) && (
+./.task_command 2> >(tee .task_error >&2) | tee .task_output
+RETCODE=${{PIPESTATUS[0]}}
+if [ "$RETCODE" -eq 0 ]; then
     {output_unstage}
     {error_unstage}
     echo ok | {status_unstage}
-) || (
+else
     [ -f .task_output ] && {output_unstage}
     [ -f .task_error ] && {error_unstage}
     echo fail | {status_unstage}
     {exit_command}
-)
+fi
+exit "$RETCODE"
 """,
     ]
