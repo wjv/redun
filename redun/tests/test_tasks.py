@@ -899,3 +899,34 @@ def test_exported_options_override(scheduler: Scheduler) -> None:
 
     # Exported options override non-exported options.
     assert scheduler.run(task2b.export_options(my_option=2)(), cache=False) == 2
+
+
+def test_signature_evaluates_string_annotations() -> None:
+    """``Task.signature`` returns evaluated annotations, not strings.
+
+    Required because:
+    - Python 3.14 with PEP 649 (deferred annotation evaluation) returns
+      ``__annotations__`` values as strings by default.
+    - Any module using ``from __future__ import annotations`` has had string
+      annotations on every Python ≥ 3.7.
+
+    Without ``eval_str=True``, downstream consumers (notably the CLI's
+    argparse-type construction in ``cli.py``) see annotations like ``'int'``
+    instead of ``int`` and fail with misleading errors at parse time.
+    """
+
+    @task
+    def t(x: int, y: str) -> int:
+        return x + len(y)
+
+    # Force-stringify annotations to simulate PEP 649 / `__future__ annotations`
+    # without depending on the test module's import style.
+    t.func.__annotations__ = {"x": "int", "y": "str", "return": "int"}
+
+    # Force re-computation by clearing the cached signature.
+    t._signature = None
+
+    sig = t.signature
+    assert sig.parameters["x"].annotation is int
+    assert sig.parameters["y"].annotation is str
+    assert sig.return_annotation is int

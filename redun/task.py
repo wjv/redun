@@ -611,12 +611,20 @@ class Task(Value, Generic[P, R]):
     def signature(self) -> inspect.Signature:
         """
         Signature of the function wrapped by the task.
+
+        ``eval_str=True`` resolves string-form annotations to actual types,
+        as required under PEP 649 (Python 3.14+) deferred annotation
+        evaluation and under modules that use
+        ``from __future__ import annotations``. Without it, downstream
+        consumers (notably the CLI's argparse-type construction) receive
+        annotations like ``'int'`` instead of ``int`` and fail with
+        misleading errors.
         """
         if not self._signature:
             if self.wrapped_task and not self.get_task_option("use_wrapper_signature", False):
-                self._signature = inspect.signature(self.inner_task.func)
+                self._signature = inspect.signature(self.inner_task.func, eval_str=True)
             else:
-                self._signature = inspect.signature(self.func)
+                self._signature = inspect.signature(self.func, eval_str=True)
         return self._signature
 
     @property
