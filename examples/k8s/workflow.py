@@ -67,14 +67,20 @@ def act(n: int = 10):
 @task
 def assert_results(results: dict):
     """Verify all k8s task results are correct."""
-    assert results["script_command"] == [0, b"hello\n"], (
-        f"script_command: {results['script_command']!r}"
-    )
+    # Script-task results are [exit_code, stdout, [stderr_per_stage]];
+    # check the exit code and stdout, ignore stderr (which may vary).
+    sc = results["script_command"]
+    assert (
+        isinstance(sc, list) and len(sc) == 3 and sc[0] == 0 and sc[1] == b"hello\n"
+    ), f"script_command: {sc!r}"
     assert results["task_sleep"] is None, f"task_sleep: {results['task_sleep']!r}"
-    assert results["script_sleep"] == [0, b""], f"script_sleep: {results['script_sleep']!r}"
+    ss = results["script_sleep"]
+    assert (
+        isinstance(ss, list) and len(ss) == 3 and ss[0] == 0 and ss[1] == b""
+    ), f"script_sleep: {ss!r}"
     assert results["task_io"] == ["task", None, None], f"task_io: {results['task_io']!r}"
     sit = results["script_inside_task"]
-    assert isinstance(sit, list) and len(sit) == 2 and sit[0] == 0, f"script_inside_task: {sit!r}"
+    assert isinstance(sit, list) and len(sit) == 3 and sit[0] == 0, f"script_inside_task: {sit!r}"
     expected_array = list(range(1, len(results["array_job"]) + 1))
     assert results["array_job"] == expected_array, f"array_job: {results['array_job']!r}"
     return "All assertions passed!"

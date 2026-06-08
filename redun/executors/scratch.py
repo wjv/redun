@@ -142,6 +142,22 @@ def parse_job_result(
     Returns job output from scratch directory.
 
     Returns a tuple of (result, exists).
+
+    For script tasks the result shape is
+    ``[exit_code, stdout_bytes, stderr_per_stage_list]``:
+
+    - ``exit_code`` — always 0 on the success path (we only reach
+      ``parse_job_result`` when the wrapper exited cleanly; failure paths
+      go through :func:`parse_job_error`). Exposed for shape uniformity
+      across success and failure.
+    - ``stdout_bytes`` — bytes from ``.task_output`` (the wrapper's
+      ``tee`` of the user command / final pipeline stage's stdout).
+    - ``stderr_per_stage_list`` — list of bytes objects. For single-stage
+      script tasks, a list of one (the merged stderr from ``.task_error``).
+      For multi-stage pipelines, this is currently still a single-element
+      list with the merged stderr; per-stage breakdown is a follow-up that
+      requires per-stage stderr files to be unstaged to scratch (see
+      ``.claude/redun-script-pipelines-plan.md``).
     """
     output_file = File(get_job_scratch_file(scratch_prefix, job, SCRATCH_OUTPUT))
     if output_file.exists():
@@ -149,7 +165,12 @@ def parse_job_result(
             with output_file.open("rb") as infile:
                 result = pickle.load(infile)
         else:
-            result = [0, output_file.read(mode="rb")]  # TODO: Get real exitcode.
+            stdout = output_file.read(mode="rb")
+            # Stderr (merged across stages for pipelines) lives at the
+            # standard `.task_error` path the wrapper already populates.
+            error_file = File(get_job_scratch_file(scratch_prefix, job, SCRATCH_ERROR))
+            stderr_bytes = error_file.read(mode="rb") if error_file.exists() else b""
+            result = [0, stdout, [stderr_bytes]]
 
         if is_valid_value is None or is_valid_value(result):
             return result, True
