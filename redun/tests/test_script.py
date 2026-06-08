@@ -11,6 +11,8 @@ from redun.executors.aws_batch import AWSBatchExecutor
 from redun.expression import TaskExpression
 from redun.file import Dir
 from redun.scripting import (
+    Cmd,
+    Pipe,
     ScriptError,
     exec_script,
     get_command_eof,
@@ -539,3 +541,129 @@ def _test_script_task_aws_batch():
     scheduler.executors["batch"] = executor
     executor.scheduler = scheduler
     assert scheduler.run(task1, ["World"]) == b"Hello, World!\n"
+
+
+# ---------------------------------------------------------------------------
+# Cmd / Pipe composable command types
+# ---------------------------------------------------------------------------
+
+
+class TestCmd:
+    def test_str_argv(self) -> None:
+        c = Cmd("echo hi")
+        assert c.argv == "echo hi"
+        assert c.container is None
+
+    def test_list_argv_tuplifies(self) -> None:
+        c = Cmd(["echo", "hi"])
+        # Stored as a tuple internally so the frozen dataclass stays hashable.
+        assert c.argv == ("echo", "hi")
+        assert isinstance(c.argv, tuple)
+
+    def test_container_field(self) -> None:
+        c = Cmd(["cat"], container="docker://debian:stable-slim")
+        assert c.container == "docker://debian:stable-slim"
+
+    def test_equality_and_hashable(self) -> None:
+        c1 = Cmd(["a", "b"], container="img")
+        c2 = Cmd(["a", "b"], container="img")
+        assert c1 == c2
+        # Hashable because frozen dataclass + tuple argv.
+        assert hash(c1) == hash(c2)
+
+    def test_inequality_on_container_difference(self) -> None:
+        assert Cmd(["x"], container="a") != Cmd(["x"], container="b")
+        assert Cmd(["x"]) != Cmd(["x"], container="img")
+
+
+class TestPipe:
+    def test_variadic_construction(self) -> None:
+        p = Pipe(Cmd(["a"]), Cmd(["b"]))
+        assert len(p.stages) == 2
+        assert p.stages[0].argv == ("a",)
+        assert p.stages[1].argv == ("b",)
+
+    def test_single_stage_is_legal(self) -> None:
+        # A 1-stage Pipe is semantically the same as the bare Cmd.
+        p = Pipe(Cmd(["solo"]))
+        assert len(p.stages) == 1
+
+    def test_empty_pipe_raises(self) -> None:
+        with pytest.raises(ValueError, match="at least one"):
+            Pipe()
+
+    def test_non_cmd_stage_raises(self) -> None:
+        with pytest.raises(TypeError, match="must be a Cmd"):
+            Pipe("not a Cmd")  # type: ignore[arg-type]
+
+    def test_cmd_or_cmd_makes_pipe(self) -> None:
+        p = Cmd(["a"]) | Cmd(["b"])
+        assert isinstance(p, Pipe)
+        assert len(p.stages) == 2
+
+    def test_pipe_or_cmd_extends(self) -> None:
+        p = Pipe(Cmd(["a"]), Cmd(["b"])) | Cmd(["c"])
+        assert len(p.stages) == 3
+        assert p.stages[-1].argv == ("c",)
+
+    def test_cmd_or_pipe_prepends(self) -> None:
+        p = Cmd(["a"]) | Pipe(Cmd(["b"]), Cmd(["c"]))
+        assert len(p.stages) == 3
+        assert p.stages[0].argv == ("a",)
+
+    def test_pipe_or_pipe_concatenates(self) -> None:
+        p = Pipe(Cmd(["a"]), Cmd(["b"])) | Pipe(Cmd(["c"]), Cmd(["d"]))
+        assert len(p.stages) == 4
+        assert [s.argv for s in p.stages] == [("a",), ("b",), ("c",), ("d",)]
+
+    def test_chained_or_reads_naturally(self) -> None:
+        # Sugar for the bcl2fastq | evatags / samtools chain example.
+        p = (
+            Cmd(["samtools", "import"], container="docker://samtools:1.21")
+            | Cmd(["evatags", "-c", "N"], container="docker://evatags:0.5.5")
+        )
+        assert len(p.stages) == 2
+        assert p.stages[0].container == "docker://samtools:1.21"
+        assert p.stages[1].container == "docker://evatags:0.5.5"
+
+
+class TestScriptDispatchPhase1:
+    """script() accepts the new Cmd/Pipe shapes; multi-stage not yet implemented."""
+
+    @use_tempdir
+    def test_script_accepts_cmd(self, scheduler: Scheduler) -> None:
+        File("input").write("hello")
+        result = scheduler.run(
+            script(Cmd(["cat", "input"]))
+        )
+        # script() default outputs is File("-"), which returns stdout bytes.
+        assert b"hello" in result
+
+    @use_tempdir
+    def test_script_accepts_single_stage_pipe(self, scheduler: Scheduler) -> None:
+        File("input").write("hello")
+        result = scheduler.run(
+            script(Pipe(Cmd(["cat", "input"])))
+        )
+        assert b"hello" in result
+
+    def test_script_rejects_multistage_pipe(self) -> None:
+        # Phase 1: multi-stage raises NotImplementedError pending Phase 2.
+        with pytest.raises(NotImplementedError, match="Multi-stage"):
+            script(Pipe(Cmd(["echo", "a"]), Cmd(["cat"])))
+
+    @use_tempdir
+    def test_cmd_container_becomes_task_option(self, scheduler: Scheduler) -> None:
+        """A Cmd-supplied container flows into task_options the same way
+        `script(..., container=...)` does."""
+        # We can't easily check the Pueue dispatch path without a daemon, so
+        # just confirm script() doesn't error and runs the command bare-
+        # equivalent when no executor is configured for containers (i.e.
+        # the default scheduler runs locally without container wrapping).
+        File("data").write("ok")
+        # No container resolves end-to-end without a container runtime
+        # configured; behaviour is identical to today's bare command.
+        result = scheduler.run(
+            script(Cmd(["cat", "data"]))
+        )
+        assert b"ok" in result

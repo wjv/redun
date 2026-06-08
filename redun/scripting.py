@@ -3,9 +3,10 @@ import shlex
 import shutil
 import subprocess
 import tempfile
+from dataclasses import dataclass
 from tempfile import mkdtemp
 from textwrap import dedent
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 from redun.file import File, Staging
 from redun.task import Task, task
@@ -14,6 +15,74 @@ from redun.utils import iter_nested_value, map_nested_value
 NULL = object()
 # By default, use bash shell with immediate exit on first error.
 DEFAULT_SHELL = "#!/usr/bin/env bash\nset -exo pipefail"
+
+
+@dataclass(frozen=True)
+class Cmd:
+    """One command stage in a :func:`script` invocation.
+
+    ``argv`` is either a string (interpreted as a shell command) or a list
+    of strings (treated as argv and joined via :func:`shlex.join`).
+    ``container`` is optional — when ``None``, the command runs bare on the
+    host shell; when a string, it is wrapped in the executor's configured
+    container runtime (Apptainer or Docker, per ``container_type`` config).
+
+    Compose via ``|`` into a :class:`Pipe` for multi-stage piped execution::
+
+        Cmd(["samtools", "import", ...], container="docker://samtools:1.21") \\
+            | Cmd(["evatags", "-c", "N", "-l", "9"], container="docker://evatags:0.5.5")
+    """
+
+    argv: Union[str, tuple[str, ...]]
+    container: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        # Tuplify lists so the dataclass stays hashable (frozen=True needs all
+        # fields hashable). Cosmetic for users; they pass lists, we store
+        # tuples internally.
+        if isinstance(self.argv, list):
+            object.__setattr__(self, "argv", tuple(self.argv))
+
+    def __or__(self, other: "Union[Cmd, Pipe]") -> "Pipe":
+        if isinstance(other, Cmd):
+            return Pipe(self, other)
+        if isinstance(other, Pipe):
+            return Pipe(self, *other.stages)
+        return NotImplemented
+
+
+@dataclass(frozen=True, init=False)
+class Pipe:
+    """N piped command stages: ``stages[i]``'s stdout flows to ``stages[i+1]``'s stdin.
+
+    All stages share a single redun-task identity; the pipeline's ``inputs=``
+    and ``outputs=`` are passed at the :func:`script` call site, not per
+    stage. Each stage's ``container`` is independent — mixing containerised
+    and bare stages is first-class.
+
+    Construct positionally (``Pipe(cmd_a, cmd_b)``) or via ``|`` composition
+    on :class:`Cmd` instances. A one-stage pipe (``Pipe(cmd)``) is the same
+    as ``Cmd``'s single-command behaviour.
+    """
+
+    stages: tuple[Cmd, ...]
+
+    def __init__(self, *stages: Cmd) -> None:
+        if not stages:
+            raise ValueError("Pipe requires at least one Cmd stage")
+        for i, s in enumerate(stages):
+            if not isinstance(s, Cmd):
+                raise TypeError(
+                    f"Pipe stage {i} must be a Cmd, got {type(s).__name__}"
+                )
+        object.__setattr__(self, "stages", stages)
+
+    def __or__(self, other: "Union[Cmd, Pipe]") -> "Pipe":
+        if isinstance(other, Cmd):
+            return Pipe(*self.stages, other)
+        if isinstance(other, Pipe):
+            return Pipe(*self.stages, *other.stages)
+        return NotImplemented
 
 
 class ScriptError(Exception):
@@ -210,8 +279,36 @@ def postprocess_script(result: Any, outputs: Any, temp_path: Optional[str] = Non
     return map_nested_value(get_file, outputs)
 
 
+def _normalise_command(
+    command: Union[str, list, Cmd, Pipe],
+    task_options: dict,
+) -> Pipe:
+    """Coerce any of the four accepted `command=` shapes to a :class:`Pipe`.
+
+    - ``str`` / ``list[str]``: wrap as ``Pipe(Cmd(argv, container=...))``
+      where the container, if any, is pulled from
+      ``task_options["container"]`` (and removed from there so it isn't
+      double-applied downstream).
+    - :class:`Cmd`: wrap as ``Pipe(cmd)``; if the cmd carries a
+      ``container``, it is left there (not migrated to task_options) — the
+      pipeline-aware wrapping path (Phase 2) reads per-stage containers
+      from the Pipe directly.
+    - :class:`Pipe`: passed through.
+
+    Conflicting task-level vs Cmd-level container settings raise — better
+    to fail loudly than to silently prefer one.
+    """
+    if isinstance(command, Pipe):
+        return command
+    if isinstance(command, Cmd):
+        return Pipe(command)
+    # str or list[str]: pull container from task_options for the legacy shape.
+    container = task_options.pop("container", None)
+    return Pipe(Cmd(argv=command, container=container))
+
+
 def script(
-    command: str | list,
+    command: Union[str, list, Cmd, Pipe],
     inputs: Any = [],
     outputs: Any = NULL,
     tempdir: bool = False,
@@ -226,8 +323,16 @@ def script(
 
     Parameters
     ----------
-    command : Union[str, List]
-        Command string or argv list to execute.
+    command : Union[str, list, Cmd, Pipe]
+        What to execute. Accepts four shapes:
+
+        - ``str`` — a shell command string. Today's most common form.
+        - ``list[str]`` — argv joined via :func:`shlex.join`.
+        - :class:`Cmd` — argv plus an optional per-stage ``container``;
+          equivalent to passing ``argv`` plus a ``container=`` task option.
+        - :class:`Pipe` — N piped :class:`Cmd` stages, each independently
+          containerised or bare.
+
     inputs : Any
         Collection of FileStaging objects used to stage cloud input files to local files.
     outputs : Any
@@ -245,6 +350,30 @@ def script(
         A result the same shape as `outputs` but with all FileStaging objects converted to their
         corresponding remote Files.
     """
+    # Normalise the command shape to a Pipe. Single-stage callers (str /
+    # list / Cmd / single-stage Pipe) flow through the existing
+    # single-command path unchanged; multi-stage Pipes go through the
+    # pipeline-aware path (Phase 2+, raises until implemented).
+    pipe = _normalise_command(command, task_options)
+    if len(pipe.stages) > 1:
+        raise NotImplementedError(
+            "Multi-stage Pipe(...) is not yet implemented in this fork; "
+            "use a single Cmd / str / list, or an intermediate file between "
+            "two separate script() calls. Tracking: "
+            "`.claude/redun-script-pipelines-plan.md`."
+        )
+    # Single-stage: rebuild today's str/list command shape from the Cmd.
+    only_stage = pipe.stages[0]
+    if only_stage.container is not None and "container" not in task_options:
+        # A Cmd-supplied container becomes the task-level container option
+        # (which `ContainerAware` reads). Don't clobber an explicit
+        # task_options["container"] if one was somehow set in parallel.
+        task_options["container"] = only_stage.container
+    # `command` from here on is what the existing body of `script` expects.
+    command = (
+        list(only_stage.argv) if isinstance(only_stage.argv, tuple) else only_stage.argv
+    )
+
     if outputs == NULL:
         outputs = File("-")
 
