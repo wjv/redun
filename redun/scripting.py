@@ -268,6 +268,20 @@ def script(
 
     outputs = map_nested_value(preprocess_output, outputs)
 
+    # Preprocess inputs (symmetric to preprocess_output above).
+    def preprocess_input(value):
+        if isinstance(value, File) and not isinstance(value, Staging):
+            # Raw File means "already at its own path"; no staging needed,
+            # but the file participates in the cache hash via the input arg
+            # to `_script`. `StagingFile.render_stage()` no-ops when
+            # `local.path == remote.path`, so this is a degenerate-case
+            # use of the existing staging machinery — not a new abstraction.
+            return value.stage(value.path)
+        else:
+            return value
+
+    inputs = map_nested_value(preprocess_input, inputs)
+
     # Stage inputs.
     command_parts.extend(input.render_stage(as_mount) for input in iter_nested_value(inputs))
 

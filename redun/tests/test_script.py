@@ -443,6 +443,44 @@ def test_script_staging_input_change(scheduler: Scheduler) -> None:
     assert scheduler.run(expr).read() == "hello2"
 
 
+@use_tempdir
+def test_script_raw_file_input(scheduler: Scheduler) -> None:
+    """
+    script() should accept raw `File` in `inputs=` (no `.stage(...)` boilerplate)
+    when the file is already at the path the command will see, AND the file's
+    content should participate in the cache hash so an edit busts the cache.
+
+    Symmetric to the existing raw-`File`-as-output handling (preprocess_output
+    in scripting.py). The raw `File` gets auto-wrapped as a no-op StagingFile
+    (local == remote); render_stage returns "" so no copy step lands in the
+    wrapper script, but the underlying File still flows into _script() as a
+    cache-affecting argument.
+    """
+
+    File("data").write("hello")
+
+    expr = script(
+        """
+        cat data > output
+        """,
+        inputs=[File("data")],
+        outputs=File("output_remote").stage("output"),
+    )
+    assert scheduler.run(expr).read() == "hello"
+
+    # Editing the raw-File input busts the cache; script re-executes.
+    File("data").write("hello2")
+
+    expr = script(
+        """
+        cat data > output
+        """,
+        inputs=[File("data")],
+        outputs=File("output_remote").stage("output"),
+    )
+    assert scheduler.run(expr).read() == "hello2"
+
+
 @mock_s3
 def _test_script_staging_s3(scheduler: Scheduler) -> None:
     s3_client = boto3.client("s3", region_name="us-east-1")
