@@ -218,9 +218,23 @@ exit $RETCODE
 
 
 @task(name="script_task", namespace="redun", version="1", script=True)
-def script_task(command: str) -> str:
+def script_task(command):
     """
     Execute a shell script as redun Task.
+
+    The ``command`` argument is the bash body that will be written to the
+    job's scratch ``.task_command`` file and executed by the executor's
+    staging wrapper.
+
+    For multi-stage pipelines from :func:`script` + :class:`Pipe`, the body
+    contains ``__REDUN_PIPELINE_STAGE_<i>__`` markers and the stages list
+    travels via the ``_pipeline_stages`` task option (which feeds the
+    cache hash). The executor substitutes markers with per-stage
+    container-wrapped invocations at submit time.
+
+    Function body is intentionally a pass-through; the task identity is
+    the *invocation*, and the executor specialises behaviour on
+    ``task.script=True``.
     """
     return command
 
@@ -277,6 +291,54 @@ def postprocess_script(result: Any, outputs: Any, temp_path: Optional[str] = Non
         shutil.rmtree(temp_path)
 
     return map_nested_value(get_file, outputs)
+
+
+_PIPELINE_STAGE_MARKER = "__REDUN_PIPELINE_STAGE_{i}__"
+
+
+def _build_pipeline_bash_body(n_stages: int) -> str:
+    """Bash body for an N-stage pipeline with per-stage stderr capture
+    and PIPESTATUS preservation.
+
+    Each stage's position is a ``__REDUN_PIPELINE_STAGE_<i>__`` placeholder
+    that the executor substitutes with the per-stage container-wrapped
+    invocation at submit time. The body assumes ``bash`` (uses pipefail
+    and ``${PIPESTATUS[@]}``) and is written with explicit shebang so it
+    can be chmod+x'd and run as ``./.task_command`` inside the existing
+    ``get_script_task_command`` outer wrapper.
+
+    Per-stage status attribution comes from ``.task_pipestatus`` (a single
+    file with the full PIPESTATUS array) plus the per-stage stderr files
+    ``.task_error_<i>``. We deliberately do NOT emit per-stage status
+    sentinels (``touch .task_stage_done_<i>``): they would all materialise
+    at once after the pipe drains, providing no live-observability value
+    over PIPESTATUS for failure attribution. Live mid-pipeline progress
+    would require in-container instrumentation, which is out of scope for
+    Phase 2.
+    """
+    # Per-stage line: each stage's stdout flows into the next via |;
+    # each stage's stderr is teed to its own .task_error_<i> file AND
+    # bubbled up to parent stderr (so it shows in pueue's log).
+    stage_lines: list[str] = []
+    for i in range(n_stages):
+        marker = _PIPELINE_STAGE_MARKER.format(i=i)
+        stage_lines.append(f"{marker} 2> >(tee .task_error_{i} >&2)")
+    pipeline = " | \\\n".join(stage_lines)
+
+    # Capture PIPESTATUS once (subsequent commands overwrite it); compute
+    # headline RETCODE as first non-zero (better for diagnostics than
+    # rightmost-non-zero, which is what pipefail's $? gives you).
+    return f"""#!/usr/bin/env bash
+set -o pipefail
+{pipeline}
+PIPESTATUS_COPY=("${{PIPESTATUS[@]}}")
+echo "${{PIPESTATUS_COPY[@]}}" > .task_pipestatus
+RETCODE=0
+for code in "${{PIPESTATUS_COPY[@]}}"; do
+    if [ "$code" -ne 0 ] && [ "$RETCODE" -eq 0 ]; then RETCODE=$code; fi
+done
+exit "$RETCODE"
+"""
 
 
 def _normalise_command(
@@ -351,28 +413,48 @@ def script(
         corresponding remote Files.
     """
     # Normalise the command shape to a Pipe. Single-stage callers (str /
-    # list / Cmd / single-stage Pipe) flow through the existing
-    # single-command path unchanged; multi-stage Pipes go through the
-    # pipeline-aware path (Phase 2+, raises until implemented).
+    # list / Cmd / single-stage Pipe) flow through the existing single-
+    # command path. Multi-stage Pipes generate a pipeline bash body with
+    # `__REDUN_PIPELINE_STAGE_<i>__` markers; the stages list flows via
+    # the `_pipeline_stages` task option, and the executor substitutes
+    # per-stage container-wrapped invocations into the markers at
+    # submit time (when the host's container_runtime is known).
     pipe = _normalise_command(command, task_options)
-    if len(pipe.stages) > 1:
-        raise NotImplementedError(
-            "Multi-stage Pipe(...) is not yet implemented in this fork; "
-            "use a single Cmd / str / list, or an intermediate file between "
-            "two separate script() calls. Tracking: "
-            "`.claude/redun-script-pipelines-plan.md`."
+    is_pipeline = len(pipe.stages) > 1
+
+    if is_pipeline:
+        if "container" in task_options:
+            raise ValueError(
+                "A multi-stage Pipe() carries per-stage containers in its "
+                "Cmd(..., container=...) entries; passing a task-level "
+                "container= alongside is ambiguous. Drop the task-level "
+                "container= and set each stage's container on its Cmd."
+            )
+        # Stages tuple: hashable (argv tuplified by Cmd; container is str or
+        # None). Stored as a task option so it participates in cache hashing
+        # alongside the bash body's marker text.
+        stages_tuple = tuple(
+            (stage.argv, stage.container) for stage in pipe.stages
         )
-    # Single-stage: rebuild today's str/list command shape from the Cmd.
-    only_stage = pipe.stages[0]
-    if only_stage.container is not None and "container" not in task_options:
-        # A Cmd-supplied container becomes the task-level container option
-        # (which `ContainerAware` reads). Don't clobber an explicit
-        # task_options["container"] if one was somehow set in parallel.
-        task_options["container"] = only_stage.container
-    # `command` from here on is what the existing body of `script` expects.
-    command = (
-        list(only_stage.argv) if isinstance(only_stage.argv, tuple) else only_stage.argv
-    )
+        task_options["_pipeline_stages"] = stages_tuple
+        # The command becomes a bash body where each stage's position is a
+        # marker. The executor substitutes markers for per-stage container-
+        # wrapped invocations at submit time.
+        command = _build_pipeline_bash_body(len(pipe.stages))
+    else:
+        # Single-stage: rebuild today's str/list command shape from the Cmd.
+        only_stage = pipe.stages[0]
+        if only_stage.container is not None and "container" not in task_options:
+            # A Cmd-supplied container becomes the task-level container
+            # option (which `ContainerAware` reads). Don't clobber an
+            # explicit task_options["container"] if one was somehow set
+            # in parallel.
+            task_options["container"] = only_stage.container
+        command = (
+            list(only_stage.argv)
+            if isinstance(only_stage.argv, tuple)
+            else only_stage.argv
+        )
 
     if outputs == NULL:
         outputs = File("-")
