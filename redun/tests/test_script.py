@@ -808,3 +808,150 @@ class TestSubstitutePipelineMarkers:
         result = ca._substitute_pipeline_markers(body, stages, {})
         assert "bash" in result
         assert "-c" in result
+
+
+# ---------------------------------------------------------------------------
+# Pipeline end-to-end behaviour (Phase 3)
+#
+# These tests run the bash body produced by `_build_pipeline_bash_body` plus
+# marker-substitution directly via subprocess. They validate the bash
+# template's correctness independently of any executor's integration —
+# Phase 4 will add executor-integrated regression tests.
+# ---------------------------------------------------------------------------
+
+
+from redun.scripting import _build_pipeline_bash_body
+
+
+def _build_and_substitute(pipe: Pipe) -> str:
+    """Build pipeline bash body for `pipe` and substitute its markers via a
+    bare `ContainerAware` instance (no container wrapping; bare-stage path)."""
+    from redun.executors.container_aware import ContainerAware
+
+    body = _build_pipeline_bash_body(len(pipe.stages))
+    stages_tuple = tuple((s.argv, s.container) for s in pipe.stages)
+    ca = ContainerAware()
+    return ca._substitute_pipeline_markers(body, stages_tuple, {})
+
+
+@use_tempdir
+def test_pipeline_two_stage_bare_runs() -> None:
+    """Smoke: ``echo … | tr a-z A-Z`` produces the expected stdout."""
+    body = _build_and_substitute(
+        Pipe(Cmd(["echo", "hello world"]), Cmd(["tr", "a-z", "A-Z"]))
+    )
+    result = subprocess.run(["bash", "-c", body], capture_output=True)
+    assert result.returncode == 0, result.stderr
+    assert b"HELLO WORLD" in result.stdout
+
+
+@use_tempdir
+def test_pipeline_per_stage_stderr_captured_to_separate_files() -> None:
+    """Each stage's stderr lands in `.task_error_<i>`, indexed per stage."""
+    body = _build_and_substitute(
+        Pipe(
+            Cmd("echo stage0_err >&2; echo data"),
+            Cmd("echo stage1_err >&2; cat"),
+        )
+    )
+    result = subprocess.run(["bash", "-c", body], capture_output=True)
+    assert result.returncode == 0
+    assert b"data" in result.stdout
+    assert "stage0_err" in File(".task_error_0").read()  # ty: ignore[unsupported-operator]
+    assert "stage1_err" in File(".task_error_1").read()  # ty: ignore[unsupported-operator]
+
+
+@use_tempdir
+def test_pipeline_first_stage_failure_propagates_exit_code() -> None:
+    """Stage 0 fails → headline exit code is stage 0's (first-failing rule)."""
+    body = _build_and_substitute(
+        Pipe(
+            Cmd("echo error >&2; exit 42"),
+            Cmd(["cat"]),
+        )
+    )
+    result = subprocess.run(["bash", "-c", body], capture_output=True)
+    assert result.returncode == 42
+
+
+@use_tempdir
+def test_pipeline_middle_stage_failure_propagates_exit_code() -> None:
+    """Stage 1 of 3 fails → exit code is stage 1's (first-failing rule)."""
+    body = _build_and_substitute(
+        Pipe(
+            Cmd(["echo", "data"]),
+            Cmd("cat; exit 7"),
+            Cmd(["cat"]),
+        )
+    )
+    result = subprocess.run(["bash", "-c", body], capture_output=True)
+    assert result.returncode == 7
+
+
+@use_tempdir
+def test_pipeline_pipestatus_sidecar_records_array() -> None:
+    """`.task_pipestatus` contains the space-separated PIPESTATUS array."""
+    body = _build_and_substitute(
+        Pipe(
+            Cmd(["echo", "ok"]),
+            Cmd("cat; exit 3"),
+            Cmd(["cat"]),
+        )
+    )
+    subprocess.run(["bash", "-c", body], capture_output=True)
+    pipestatus = File(".task_pipestatus").read().strip()  # ty: ignore[unsupported-operator]
+    assert pipestatus == "0 3 0"
+
+
+@use_tempdir
+def test_pipeline_all_success_pipestatus_all_zero() -> None:
+    """Healthy pipeline: PIPESTATUS array is all zeros."""
+    body = _build_and_substitute(
+        Pipe(Cmd(["echo", "a"]), Cmd(["cat"]), Cmd(["cat"]))
+    )
+    result = subprocess.run(["bash", "-c", body], capture_output=True)
+    assert result.returncode == 0
+    pipestatus = File(".task_pipestatus").read().strip()  # ty: ignore[unsupported-operator]
+    assert pipestatus == "0 0 0"
+
+
+@use_tempdir
+def test_pipeline_binary_safe_through_pipe() -> None:
+    """Arbitrary bytes flow through the pipe without text-coercion.
+
+    Critical for bioinformatics use cases where stages stream binary
+    formats (BAM, gzipped, etc.). Confirmed Nextflow-style text-coercion
+    bug doesn't exist here.
+    """
+    import gzip
+
+    # Stage 0 emits raw bytes, gzipped; stage 1 just passes them through.
+    body = _build_and_substitute(
+        Pipe(
+            Cmd(r"printf '\x00\x01\xff\xfe\x42\x00\xa5' | gzip"),
+            Cmd(["cat"]),
+        )
+    )
+    result = subprocess.run(["bash", "-c", body], capture_output=True)
+    assert result.returncode == 0
+    decompressed = gzip.decompress(result.stdout)
+    assert decompressed == b"\x00\x01\xff\xfe\x42\x00\xa5"
+
+
+@use_tempdir
+def test_pipeline_four_stages_compose() -> None:
+    """N=4 stages compose correctly; per-stage stderr files all written."""
+    body = _build_and_substitute(
+        Pipe(
+            Cmd("echo line1; echo line2; echo line3"),
+            Cmd(["grep", "line"]),
+            Cmd(["wc", "-l"]),
+            Cmd(["tr", "-d", " "]),
+        )
+    )
+    result = subprocess.run(["bash", "-c", body], capture_output=True)
+    assert result.returncode == 0
+    assert result.stdout.strip() == b"3"
+    # All four per-stage stderr files exist (may be empty).
+    for i in range(4):
+        assert File(f".task_error_{i}").exists()  # ty: ignore[unsupported-operator]
