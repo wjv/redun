@@ -66,6 +66,87 @@ Inline tasks run synchronously on the scheduler thread. They block the scheduler
 
 ---
 
+## Piping between commands and containers
+
+For multi-stage tool chains — the classic `samtools view | tool_b | tool_c` shape, where each tool may live in its own container — use `script()` with a `Pipe` of `Cmd` stages instead of a single command:
+
+```python
+from redun.scripting import Cmd, Pipe, script
+
+result = script(
+    Pipe(
+        Cmd(["samtools", "import", ...], container="docker://some/samtools:1.21"),
+        Cmd(["evatags", "-c", "N", "-l", "9", "-o", "out.bam"], container="docker://some/evatags:0.5.5"),
+    ),
+    executor="pueue",
+)
+```
+
+Or use the `|` overload for shell-pipe-like sugar:
+
+```python
+result = script(
+    Cmd(["samtools", "import", ...], container="docker://some/samtools:1.21")
+    | Cmd(["evatags", "-c", "N", "-l", "9", "-o", "out.bam"], container="docker://some/evatags:0.5.5"),
+    executor="pueue",
+)
+```
+
+Each stage independently declares its own `container` (or no container — bare stages run on the host shell). Stages compose freely: all-bare, all-containerised, or mixed.
+
+The pipeline runs as **one shell process** inside a single executor submission, with kernel-level pipes between the stage processes. No intermediate files; no inter-task coordination overhead; no concerns about scheduler-side co-scheduling timing.
+
+### What you get
+
+- **Streaming between stages** via bash pipes (byte-clean — binary data passes through unchanged).
+- **Cross-runtime portability**: the same `container="docker://..."` reference works on Apptainer hosts and Docker hosts; the per-host `container_type` config picks the runtime.
+- **Per-stage stderr capture**: each stage's stderr lands in a separate `.task_error_<i>` file in scratch; the merged stderr lands in `.task_error` (same as today's single-command path).
+- **First-failing exit code propagation**: if any stage fails, the first non-zero exit code becomes the headline `RETCODE`; the full PIPESTATUS array is also recorded to `.task_pipestatus` for forensic inspection.
+
+### What stays the same
+
+`script()`'s `inputs=`, `outputs=`, `tempdir=`, `as_mount=`, and standard task-options (`vcpus=`, `memory=`, etc.) all apply to the pipeline as a whole. Per-stage `binds` and `passthrough_env` are not currently supported (uniform across stages — file a request if this matters).
+
+### Mixed bare and containerised stages
+
+```python
+script(
+    Pipe(
+        Cmd(["samtools", "view", "-h", input_bam.path], container="docker://some/samtools:1.21"),
+        Cmd(["awk", "/some-filter/"]),       # bare; runs on host
+        Cmd(["gzip"]),                       # bare
+    ),
+    executor="pueue",
+    outputs=File("filtered.sam.gz"),
+)
+```
+
+### Caveats
+
+- **Pueue-only for now.** Multi-stage `Pipe` requires an executor that integrates the per-stage container-substitution path. `PueueExecutor` does; `LocalExecutor` does not. If you need pipelines under `executor="default"` or `executor="local"`, file a request — the work is small but not yet done.
+- **`script_task`'s return shape changed**: see the next section ("script() return shape: stderr-on-success").
+- **String argv with container needs bash in the image.** If a stage uses string argv (`Cmd("foo | bar", container="X")` rather than `Cmd(["foo", "bar"], container="X")`), the substitution wraps the command as `bash -c '…'`, which requires bash on the image's PATH. Using list-argv avoids this requirement.
+
+---
+
+## `script()` return shape: stderr-on-success
+
+The return value of `script()` (when `outputs=File("-")`, the default) is a 3-element list:
+
+```python
+[exit_code, stdout_bytes, stderr_per_stage_list]
+```
+
+- `exit_code`: 0 on the success path. Failures raise `ScriptError` rather than returning a non-zero exit code.
+- `stdout_bytes`: the final stage's stdout (raw bytes; binary-safe).
+- `stderr_per_stage_list`: a *list* of bytes objects. Currently always a single-element list containing the merged stderr from all stages combined. Per-stage breakdown will land in a follow-up commit (the merged file is what the wrapper currently unstages to scratch; per-stage files are written but not yet unstaged).
+
+For single-stage `script()` calls, the list still has one element (the merged stderr). The shape is uniform across single-stage and multi-stage so consumers don't have to dispatch on Pipe usage.
+
+> **Migration note**: this is a breaking change versus the upstream `[exit_code, stdout_bytes]` 2-element shape. Code that does `result[0]` and `result[1]` keeps working; code that does `exit, stdout = result` or `result == [0, b"..."]` needs updating. `LocalExecutor` is a known exception that still returns just `bytes` — that asymmetry pre-dates this change and is tracked as a follow-up.
+
+---
+
 ## Task options reference (fork additions)
 
 | Option | Type | Default | Cache-affecting? |
