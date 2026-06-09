@@ -186,3 +186,83 @@ def test_get_script_task_command_propagates_success_exit_code() -> None:
     )
     with open(f"{scratch_dir}/status") as f:
         assert f.read().strip() == "ok"
+
+
+# ---------------------------------------------------------------------------
+# parse_job_result — new 3-element shape for script tasks (Phase 4)
+# ---------------------------------------------------------------------------
+
+
+@use_tempdir
+def test_parse_job_result_script_returns_three_element_shape() -> None:
+    """For script tasks, parse_job_result returns
+    ``[exit_code, stdout, [stderr_per_stage]]`` — always a 3-element list
+    with stderr_per_stage as a list.
+    """
+    import os
+    from redun.executors.scratch import parse_job_result
+
+    @task(script=True)
+    def script_task1():
+        return "echo hi"
+
+    expr = script_task1()
+    job = Job(script_task1, expr)
+    job.eval_hash = "eval_hash"
+
+    scratch_dir = "scratch/jobs/eval_hash"
+    os.makedirs(scratch_dir, exist_ok=True)
+    # Populate the scratch files the wrapper would have written.
+    File(f"{scratch_dir}/output").write("hello\n")
+    File(f"{scratch_dir}/error").write("warning to stderr\n")
+
+    result, exists = parse_job_result("scratch", job)
+    assert exists
+    assert result == [0, b"hello\n", [b"warning to stderr\n"]]
+
+
+@use_tempdir
+def test_parse_job_result_script_handles_missing_stderr_file() -> None:
+    """If ``.task_error`` doesn't exist in scratch (e.g., the wrapper had
+    no stderr output to capture), the stderr element is an empty-bytes
+    list-of-one — not missing or None."""
+    import os
+    from redun.executors.scratch import parse_job_result
+
+    @task(script=True)
+    def script_task2():
+        return "true"
+
+    expr = script_task2()
+    job = Job(script_task2, expr)
+    job.eval_hash = "eval_hash"
+
+    scratch_dir = "scratch/jobs/eval_hash"
+    os.makedirs(scratch_dir, exist_ok=True)
+    File(f"{scratch_dir}/output").write("")
+    # No `.task_error` file written.
+
+    result, exists = parse_job_result("scratch", job)
+    assert exists
+    assert result == [0, b"", [b""]]
+
+
+@use_tempdir
+def test_parse_job_result_non_script_task_unchanged() -> None:
+    """Non-script (regular) tasks are unaffected: result is pickled output."""
+    import os
+    import pickle
+    from redun.executors.scratch import parse_job_result
+
+    expr = task1(42)
+    job = Job(task1, expr)
+    job.eval_hash = "eval_hash"
+
+    scratch_dir = "scratch/jobs/eval_hash"
+    os.makedirs(scratch_dir, exist_ok=True)
+    with open(f"{scratch_dir}/output", "wb") as f:
+        pickle.dump(42, f)
+
+    result, exists = parse_job_result("scratch", job)
+    assert exists
+    assert result == 42

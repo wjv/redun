@@ -444,7 +444,9 @@ def test_executor_script(
     executor._monitor()
 
     # Ensure job returns result to scheduler.
-    assert scheduler.job_results[job.id] == [0, b"done"]
+    # Shape: [exit_code, stdout, [stderr_per_stage]]. No `.task_error`
+    # file was written for this test, so the stderr-bytes element is b"".
+    assert scheduler.job_results[job.id] == [0, b"done", [b""]]
 
     # Prepare API mocks for job submission.
     batch_job_id = "456"

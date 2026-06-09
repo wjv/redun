@@ -388,10 +388,22 @@ class PueueExecutor(ContainerAware, Executor):
                 code_file=self._code_file,
             )
         else:
+            task_command = get_task_command(job.task, args, kwargs)
+            # Pipeline path: when `_pipeline_stages` is set on the task
+            # options (by `script()` for a multi-stage `Pipe`), the
+            # task_command body contains `__REDUN_PIPELINE_STAGE_<i>__`
+            # markers; substitute them with per-stage container-wrapped
+            # invocations BEFORE handing to `get_script_task_command`
+            # (which writes the body into scratch verbatim).
+            stages = job_options.get("_pipeline_stages")
+            if stages:
+                task_command = self._substitute_pipeline_markers(
+                    task_command, stages, job_options
+                )
             command = get_script_task_command(
                 self._scratch_prefix,
                 job,
-                get_task_command(job.task, args, kwargs),
+                task_command,
                 as_mount=True,
             )
 

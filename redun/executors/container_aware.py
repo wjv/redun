@@ -132,6 +132,62 @@ class ContainerAware:
         value = task_options.get("passthrough_env", None)
         return list(self.default_passthrough_env) if value is None else list(value)
 
+    def _substitute_pipeline_markers(
+        self, bash_body: str, stages: tuple, task_options: dict
+    ) -> str:
+        """Replace ``__REDUN_PIPELINE_STAGE_<i>__`` markers in ``bash_body``
+        with per-stage container-wrapped invocations.
+
+        Executor-time substitution is necessary because per-stage container
+        wrapping needs the host's resolved runtime (Apptainer vs Docker per
+        ``container_type``), which lives on this ``ContainerAware`` instance
+        and is not knowable in ``script()`` at workflow-author time.
+
+        **Security/correctness note:** ``bash_body`` must originate from
+        :func:`redun.scripting._build_pipeline_bash_body`. Do not pass
+        user-supplied or external text through this function — the marker
+        pattern is improbable but not guaranteed unique in arbitrary text,
+        and a stray collision would silently corrupt the script.
+
+        ``stages`` is a tuple of ``(argv, container_or_None)`` pairs as
+        emitted by ``script()`` into the ``_pipeline_stages`` task option.
+        ``argv`` is either a str (shell command, runs via ``bash -c`` —
+        the container image must therefore have ``bash`` on PATH) or a
+        tuple of strings (argv list, invoked directly — no shell required
+        in the container).
+
+        Bare stages (``container is None``) are passed through with no
+        wrapping. Per-stage ``binds`` and ``passthrough_env`` inherit from
+        task-level options uniformly (no per-stage override in Phase 2).
+        """
+        import shlex
+
+        for i, (argv, container) in enumerate(stages):
+            marker = f"__REDUN_PIPELINE_STAGE_{i}__"
+            # Normalise argv to a list[str] for the runner.
+            if isinstance(argv, str):
+                # A str argv is interpreted as a shell command: wrap it in
+                # `bash -c ...` so the shell parses redirects, expansions,
+                # etc. inside the container. NOTE: the container image
+                # must have `bash` on PATH. Pass argv as a tuple/list to
+                # avoid this requirement.
+                argv_list = ["bash", "-c", argv]
+            else:
+                argv_list = list(argv)
+
+            if container is None:
+                # Bare stage. The substituted string is the argv joined
+                # by shlex (so it's a single shell-quoted token sequence).
+                substitution = shlex.join(argv_list)
+            else:
+                stage_options = {**task_options, "container": container}
+                wrapped = self._wrap_command_for_container(argv_list, stage_options)
+                substitution = shlex.join(wrapped)
+
+            bash_body = bash_body.replace(marker, substitution)
+
+        return bash_body
+
     def _wrap_command_for_container(
         self, cmd: List[str], task_options: dict
     ) -> List[str]:
