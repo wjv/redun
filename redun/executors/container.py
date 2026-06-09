@@ -122,7 +122,16 @@ class DockerRunner:
         vcpus: Optional[int] = None,
         gpus: Optional[int] = None,
     ) -> List[str]:
-        args = ["docker", "run", "--rm"]
+        # ``-i`` (interactive) attaches the container's stdin to the
+        # caller's. Required for the multi-stage `script(Pipe(...))`
+        # case so that stage N+1 actually receives stage N's stdout
+        # over the bash pipe — without ``-i`` Docker hands the
+        # container process an empty stdin regardless of what bash
+        # is piping. Apptainer's ``exec`` attaches stdin by default,
+        # so this is a Docker-only quirk. Always-on is safe: ``-i``
+        # on a stage with nothing to read just attaches an unused
+        # stdin. (NOT ``-t``: a TTY would corrupt binary pipe data.)
+        args = ["docker", "run", "--rm", "-i"]
 
         for host, container in volumes:
             args.extend(["-v", f"{host}:{container}"])

@@ -79,14 +79,28 @@ class TestDockerRunner:
     def test_basic_command(self) -> None:
         runner = DockerRunner()
         result = runner.wrap_command(["echo", "hello"], image="my-image:latest")
-        # `--entrypoint echo` bypasses any image-declared ENTRYPOINT;
-        # remaining args follow the image positionally per Docker convention.
+        # `-i` attaches stdin (required so multi-stage Pipe stages receive
+        # stdin from bash; harmless when unused). `--entrypoint echo`
+        # bypasses any image-declared ENTRYPOINT; remaining args follow
+        # the image positionally per Docker convention.
         assert result == [
-            "docker", "run", "--rm",
+            "docker", "run", "--rm", "-i",
             "--entrypoint", "echo",
             "my-image:latest",
             "hello",
         ]
+
+    def test_includes_interactive_stdin_flag(self) -> None:
+        """``-i`` must be present so multi-stage `Pipe` stages can read
+        stdin from the upstream stage via the bash pipe. (Q4 back-channel,
+        2026-06-09: without ``-i``, docker hands the container empty
+        stdin regardless of what bash is piping.)"""
+        runner = DockerRunner()
+        result = runner.wrap_command(["cat"], image="img")
+        assert "-i" in result
+        # NOT `-t` — TTY would corrupt binary pipe data.
+        assert "-t" not in result
+        assert "-it" not in result
 
     def test_volumes(self) -> None:
         runner = DockerRunner()
