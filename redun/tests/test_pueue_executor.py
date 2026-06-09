@@ -140,6 +140,11 @@ def test_executor_pueue(
     assert call_kwargs["group"] == "compute"
     assert call_kwargs["jobs"] == 2
     assert call_kwargs["label"] == "redun:eval_hash"
+    # `working_directory` is the per-job scratch dir so the wrapper's
+    # `.task_command` / `.task_output` / `.task_error` files land in
+    # scratch rather than leaking into pueued's cwd. (Q4 back-channel
+    # request, 2026-06-09.)
+    assert call_kwargs["working_directory"].endswith("/jobs/eval_hash")
 
     # Simulate output file created by job.
     scratch_dir = executor._scratch_prefix

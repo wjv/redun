@@ -455,6 +455,15 @@ class PueueExecutor(ContainerAware, Executor):
             **job.get_options(),
         }
 
+        # Per-job scratch dir doubles as pueue's working directory so that
+        # the wrapper's `.task_command` / `.task_output` / `.task_error`
+        # files (and any per-stage `.task_error_<i>` for pipelines) land
+        # in scratch rather than leaking into pueued's cwd. Containerised
+        # tasks don't depend on this — their `./` resolves inside the
+        # container — but bare tasks do, and operators consuming the
+        # leak files in pueued's cwd is a known annoyance.
+        job_dir = get_job_scratch_dir(self._scratch_prefix, job)
+
         try:
             command = self._build_command(job, args, kwargs, job_options)
 
@@ -470,13 +479,12 @@ class PueueExecutor(ContainerAware, Executor):
                 jobs=jobs_slots,
                 label=label,
                 config_path=self._config_path,
+                working_directory=job_dir,
             )
 
         except (PueueError, OSError) as exc:
             self._scheduler.reject_job(job, exc)
             return
-
-        job_dir = get_job_scratch_dir(self._scratch_prefix, job)
         self.log(
             "submit redun job {redun_job} as pueue task {pueue_id}:\n"
             "  pueue_id   = {pueue_id}\n"
