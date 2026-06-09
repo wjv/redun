@@ -41,6 +41,17 @@ max_workers = 20
 def get_abs_url(uri: str, base: str) -> str:
     """
     Returns URI with absolute path.
+
+    Only file-based URI schemes (sqlite) have their path component
+    rewritten as an absolute filesystem path. For non-file dialects —
+    notably ``postgresql://…`` — an empty netloc means "use the default
+    host/socket"; the path is the database *name*, not a filesystem
+    path, and must not be rewritten. Upstream redun's prior version of
+    this function gated only on ``netloc != ""``, which silently
+    rewrote ``postgresql:///dbname?service=...`` into
+    ``postgresql:////<config_dir>/dbname?service=...`` and broke
+    pg_hba.conf matching for the affected database. See back-channel
+    coredb-to-redun.md 2026-06-09 for the diagnosis.
     """
     if re.match(r"^[^:]+:////", uri):
         # URI starts with four slashes, so it is already absolute.
@@ -48,6 +59,14 @@ def get_abs_url(uri: str, base: str) -> str:
 
     # Parse db_uri.
     url_parts = urlparse(uri)
+
+    # Only rewrite file-based URLs. For postgresql/mysql/etc., even an
+    # empty netloc is valid (libpq interprets it as "use service file or
+    # localhost socket") and the path is the database name. Rewriting
+    # would corrupt the dbname into an absolute filesystem path.
+    if not url_parts.scheme.startswith("sqlite"):
+        return uri
+
     if url_parts.netloc != "":
         # Non-file based URL. Use as is.
         return uri

@@ -262,3 +262,51 @@ KEY = bar
 
     assert config["section"]["key"] == "foo"
     assert config["section"]["KEY"] == "bar"
+
+
+# ---------------------------------------------------------------------------
+# get_abs_url: only rewrite file-based (sqlite) URIs
+# ---------------------------------------------------------------------------
+
+
+def test_get_abs_url_rewrites_sqlite_relative_path() -> None:
+    """SQLite relative paths get resolved against the config dir (the
+    original intent of get_abs_url)."""
+    from redun.scheduler_config import get_abs_url
+
+    result = get_abs_url("sqlite:///redun.db", "/abs/config/dir")
+    assert result == "sqlite:////abs/config/dir/redun.db"
+
+
+def test_get_abs_url_leaves_sqlite_absolute_path_unchanged() -> None:
+    """Already-absolute SQLite URIs (4 slashes) pass through unchanged."""
+    from redun.scheduler_config import get_abs_url
+
+    result = get_abs_url("sqlite:////abs/path/redun.db", "/abs/config/dir")
+    assert result == "sqlite:////abs/path/redun.db"
+
+
+def test_get_abs_url_leaves_postgresql_url_with_empty_netloc_unchanged() -> None:
+    """For ``postgresql:///dbname?service=...`` style URLs, the path is the
+    database name, not a filesystem path; rewriting would corrupt dbname.
+
+    Regression: `coredb-to-redun.md` 2026-06-09 — rewriting
+    ``postgresql+psycopg:///coredb?service=coredb_redun`` into
+    ``postgresql+psycopg:////<config_dir>/coredb?service=...`` made
+    SQLAlchemy hand libpq an absolute filesystem path as dbname,
+    breaking pg_hba.conf matching for the actual database name.
+    """
+    from redun.scheduler_config import get_abs_url
+
+    uri = "postgresql+psycopg:///coredb?service=coredb_redun"
+    result = get_abs_url(uri, "/some/config/dir")
+    assert result == uri  # unchanged
+
+
+def test_get_abs_url_leaves_postgresql_url_with_host_unchanged() -> None:
+    """Standard postgresql URLs with an explicit host also pass through."""
+    from redun.scheduler_config import get_abs_url
+
+    uri = "postgresql://user@host:5432/dbname"
+    result = get_abs_url(uri, "/some/config/dir")
+    assert result == uri
