@@ -3308,12 +3308,21 @@ class RedunBackendDb(RedunBackend):
             )
 
         credentials = RedunBackendDb._get_login_credentials(conf, parts.username)
-        if credentials:
-            if "@" in parts.netloc:
-                _, netloc = parts.netloc.rsplit("@", 1)
-            else:
-                netloc = parts.netloc
-            parts = parts._replace(netloc=f"{credentials}@{netloc}")
+        if not credentials:
+            # Short-circuit when there are no credentials to inject.
+            # `urlunparse(parts)` on an empty-netloc URL drops one slash:
+            # `postgresql:///dbname?service=foo` round-trips to
+            # `postgresql:/dbname?service=foo`, breaking the libpq-shorthand
+            # form. By returning the input verbatim when nothing changed,
+            # we preserve the URL exactly. (When credentials ARE injected,
+            # netloc becomes non-empty and urlunparse round-trips cleanly,
+            # so the round-trip path below is safe in that branch.)
+            return base_uri
+        if "@" in parts.netloc:
+            _, netloc = parts.netloc.rsplit("@", 1)
+        else:
+            netloc = parts.netloc
+        parts = parts._replace(netloc=f"{credentials}@{netloc}")
         return urlunparse(parts)
 
     @staticmethod

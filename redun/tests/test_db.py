@@ -1580,3 +1580,148 @@ def test_db_retries(scheduler: Scheduler, session: Session) -> None:
     with pytest.raises(OperationalError):
         with patch.object(RedunBackendDb, "with_session", side_effect=mock_with_session):
             assert scheduler.run(add(1, 2)) == 3
+
+
+# ---------------------------------------------------------------------------
+# _get_credentialed_uri: round-trip safety for empty-netloc URLs
+#
+# Regression suite for the urlunparse(urlparse(url)) round-trip bug that
+# stripped a slash from `postgresql:///dbname?service=foo` style URLs.
+# Coredb back-channel 2026-06-09 (still-later).
+# ---------------------------------------------------------------------------
+
+
+from redun.backends.db import RedunBackendDb, RedunDatabaseError
+from redun.config import Config
+
+
+def _conf(**values: str):
+    """Build a config section for the URI helpers."""
+    cfg = Config({"backend": values})
+    return cfg["backend"]
+
+
+class TestGetCredentialedUri:
+    """Direct unit tests of the URI helper that nearly all execution paths hit."""
+
+    def test_postgres_empty_netloc_no_env_passes_through_verbatim(self, monkeypatch) -> None:
+        """`postgresql:///dbname?service=foo` (libpq shorthand: empty
+        authority + path is the database name) must NOT have its slashes
+        stripped by urlunparse round-tripping. This was the bug Q4 hit
+        on eva.15."""
+        monkeypatch.delenv("REDUN_DB_USERNAME", raising=False)
+        monkeypatch.delenv("REDUN_DB_PASSWORD", raising=False)
+        uri = "postgresql+psycopg:///coredb?service=coredb_redun"
+        assert RedunBackendDb._get_credentialed_uri(uri, _conf()) == uri
+
+    def test_postgres_empty_netloc_with_username_env_injects_user(
+        self, monkeypatch
+    ) -> None:
+        """When `REDUN_DB_USERNAME` is set, the URL gains `user@/` and the
+        triple-slash form is preserved (netloc becomes `user@`, non-empty,
+        so urlunparse round-trips cleanly)."""
+        monkeypatch.setenv("REDUN_DB_USERNAME", "redun_writer")
+        monkeypatch.delenv("REDUN_DB_PASSWORD", raising=False)
+        uri = "postgresql+psycopg:///coredb?service=coredb_redun"
+        result = RedunBackendDb._get_credentialed_uri(uri, _conf())
+        # netloc went from "" to "redun_writer@"; path/query preserved.
+        assert result == "postgresql+psycopg://redun_writer@/coredb?service=coredb_redun"
+
+    def test_postgres_empty_netloc_with_username_and_password_env(
+        self, monkeypatch
+    ) -> None:
+        """Both env vars set → `user:pass@/dbname` form."""
+        monkeypatch.setenv("REDUN_DB_USERNAME", "redun_writer")
+        monkeypatch.setenv("REDUN_DB_PASSWORD", "secret")
+        uri = "postgresql+psycopg:///coredb?service=coredb_redun"
+        result = RedunBackendDb._get_credentialed_uri(uri, _conf())
+        assert result == "postgresql+psycopg://redun_writer:secret@/coredb?service=coredb_redun"
+
+    def test_postgres_full_url_no_env_passes_through(self, monkeypatch) -> None:
+        """Standard `postgresql://host:port/dbname` form with non-empty
+        netloc round-trips through urlparse/urlunparse without mangling,
+        but we still want the short-circuit for clarity. Verify it returns
+        the input."""
+        monkeypatch.delenv("REDUN_DB_USERNAME", raising=False)
+        monkeypatch.delenv("REDUN_DB_PASSWORD", raising=False)
+        uri = "postgresql://host.example.com:5432/dbname"
+        assert RedunBackendDb._get_credentialed_uri(uri, _conf()) == uri
+
+    def test_postgres_full_url_with_username_env_overrides(
+        self, monkeypatch
+    ) -> None:
+        """Env-var username replaces any user in the URL."""
+        monkeypatch.setenv("REDUN_DB_USERNAME", "new_user")
+        monkeypatch.delenv("REDUN_DB_PASSWORD", raising=False)
+        uri = "postgresql://old_user@host:5432/dbname"
+        result = RedunBackendDb._get_credentialed_uri(uri, _conf())
+        assert result == "postgresql://new_user@host:5432/dbname"
+
+    def test_postgres_full_url_user_in_url_no_env_passes_through(
+        self, monkeypatch
+    ) -> None:
+        """URL contains a user, env vars unset → returns input unchanged
+        (parts.username falls through as the default and credentials==username
+        produces an identical reconstruction; but the short-circuit returns
+        the original anyway)."""
+        # NOTE: in this path `_get_login_credentials` reads
+        # `os.getenv(env, parts.username)` → returns parts.username.
+        # That's "credentials present", so the short-circuit DOES NOT
+        # trigger. We're verifying urlunparse round-trips a non-empty
+        # netloc cleanly.
+        monkeypatch.delenv("REDUN_DB_USERNAME", raising=False)
+        monkeypatch.delenv("REDUN_DB_PASSWORD", raising=False)
+        uri = "postgresql://user@host:5432/dbname"
+        # netloc reassembly: `_get_credentialed_uri` peels `user` off
+        # parts.username, looks it up, gets `user` back, replaces
+        # netloc=`user@host:5432`. End result = input.
+        assert RedunBackendDb._get_credentialed_uri(uri, _conf()) == uri
+
+    def test_url_with_password_in_uri_raises(self, monkeypatch) -> None:
+        """Passwords in the URI itself are rejected to force env-var usage."""
+        monkeypatch.delenv("REDUN_DB_USERNAME", raising=False)
+        monkeypatch.delenv("REDUN_DB_PASSWORD", raising=False)
+        uri = "postgresql://user:secret@host:5432/dbname"
+        with pytest.raises(RedunDatabaseError, match="Do not include passwords"):
+            RedunBackendDb._get_credentialed_uri(uri, _conf())
+
+    def test_sqlite_uri_passes_through_unchanged(self, monkeypatch) -> None:
+        """SQLite URIs go through `_get_uri`'s sqlite shortcut and never
+        hit `_get_credentialed_uri`; if they did, this verifies the
+        helper would still leave them alone."""
+        monkeypatch.delenv("REDUN_DB_USERNAME", raising=False)
+        monkeypatch.delenv("REDUN_DB_PASSWORD", raising=False)
+        uri = "sqlite:///path/to/redun.db"
+        assert RedunBackendDb._get_credentialed_uri(uri, _conf()) == uri
+
+
+class TestGetUriEndToEnd:
+    """End-to-end through `_get_uri` (the entry-point called by
+    `RedunBackendDb.__init__`). Verifies the URL we hand SQLAlchemy is
+    what the user wrote in redun.ini."""
+
+    def test_postgres_service_form_preserved_end_to_end(
+        self, monkeypatch
+    ) -> None:
+        """The Q4 / coredb-prod case: `postgresql:///dbname?service=foo`
+        flows from redun.ini through to SQLAlchemy verbatim."""
+        monkeypatch.delenv("REDUN_DB_USERNAME", raising=False)
+        monkeypatch.delenv("REDUN_DB_PASSWORD", raising=False)
+        uri = "postgresql+psycopg:///coredb?service=coredb_redun"
+        result = RedunBackendDb._get_uri(uri, _conf())
+        assert result == uri
+
+    def test_postgres_service_form_preserved_via_backend_init(
+        self, monkeypatch
+    ) -> None:
+        """All the way through `RedunBackendDb.__init__`: the stored
+        `self.db_uri` is the URL the user supplied (no surgery)."""
+        monkeypatch.delenv("REDUN_DB_USERNAME", raising=False)
+        monkeypatch.delenv("REDUN_DB_PASSWORD", raising=False)
+        uri = "postgresql+psycopg:///coredb?service=coredb_redun"
+        # Construct backend WITHOUT calling create_engine (which would
+        # try to actually connect to Postgres). __init__ does the URI
+        # transformation; engine creation is deferred to load() /
+        # create_engine().
+        backend = RedunBackendDb(db_uri=uri, config=_conf(automigrate="False"))
+        assert backend.db_uri == uri

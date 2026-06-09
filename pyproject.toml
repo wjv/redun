@@ -1,10 +1,10 @@
 [project]
 name = "redun"
-version = "0.44.2+eva.15"
+version = "0.44.2+eva.16"
 description = "Yet another redundant workflow engine."
 readme = "README.md"
 requires-python = ">=3.10"
-license = {text = "Apache-2.0"}
+license = "Apache-2.0"
 authors = [
     {name = "Matt Rasmussen", email = "rasmus@insitro.com"},
 ]
@@ -16,7 +16,6 @@ classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: Apache Software License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
@@ -108,7 +107,7 @@ dev = [
 ]
 
 [build-system]
-requires = ["uv_build>=0.9.22,<0.10.0"]
+requires = ["uv_build>=0.9.22,<1.0"]
 build-backend = "uv_build"
 
 [tool.uv.build-backend]
