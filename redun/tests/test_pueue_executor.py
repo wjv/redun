@@ -5,8 +5,11 @@ from unittest.mock import Mock, patch
 from redun import File, task
 from redun.config import Config
 from redun.executors.pueue import (
+    PueueError,
     PueueExecutor,
+    PueueVersion,
     get_pueue_task_status,
+    get_pueue_version,
     iter_pueue_job_status,
     pueue_add,
 )
@@ -93,8 +96,70 @@ class TestPueueHelpers:
         task_info = {"status": {"Queued": {"enqueued_at": "2026-01-01T00:00:00Z"}}}
         assert get_pueue_task_status(task_info) is None
 
+    def test_get_pueue_task_status_killed(self) -> None:
+        task_info = {"status": {"Done": {"result": "Killed"}}}
+        assert get_pueue_task_status(task_info) == "FAILED"
+
+    def test_get_pueue_task_status_dependency_failed(self) -> None:
+        # When an upstream pueue task fails, downstream dependents get
+        # ``result: "DependencyFailed"`` — a string, not a dict.
+        task_info = {"status": {"Done": {"result": "DependencyFailed"}}}
+        assert get_pueue_task_status(task_info) == "FAILED"
+
+    def test_get_pueue_task_status_stashed(self) -> None:
+        task_info = {"status": {"Stashed": {"enqueue_at": None}}}
+        assert get_pueue_task_status(task_info) is None
+
+
+class TestPueueVersion:
+    def setup_method(self) -> None:
+        get_pueue_version.cache_clear()
+
+    def teardown_method(self) -> None:
+        get_pueue_version.cache_clear()
+
+    @patch("subprocess.check_output")
+    def test_parses_standard_output(self, mock_check_output: Mock) -> None:
+        mock_check_output.return_value = b"pueue 4.0.4\n"
+        v = get_pueue_version()
+        assert (v.major, v.minor, v.patch) == (4, 0, 4)
+        assert v.suffix == ""
+        assert str(v) == "4.0.4"
+
+    @patch("subprocess.check_output")
+    def test_parses_fork_suffix(self, mock_check_output: Mock) -> None:
+        mock_check_output.return_value = b"pueue 4.0.4-eva.2\n"
+        v = get_pueue_version()
+        assert (v.major, v.minor, v.patch) == (4, 0, 4)
+        assert v.suffix == "-eva.2"
+        assert str(v) == "4.0.4-eva.2"
+
+    @patch("subprocess.check_output")
+    def test_unparseable_output_raises(self, mock_check_output: Mock) -> None:
+        mock_check_output.return_value = b"hello world\n"
+        try:
+            get_pueue_version()
+        except PueueError as exc:
+            assert "could not parse" in str(exc)
+        else:
+            assert False, "expected PueueError"
+
+    @patch("subprocess.check_output")
+    def test_missing_binary_raises(self, mock_check_output: Mock) -> None:
+        mock_check_output.side_effect = FileNotFoundError("pueue")
+        try:
+            get_pueue_version()
+        except PueueError as exc:
+            assert "could not run" in str(exc)
+        else:
+            assert False, "expected PueueError"
+
 
 @use_tempdir
+@patch(
+    "redun.executors.pueue.get_pueue_version",
+    new=Mock(return_value=PueueVersion(4, 0, 4, "-eva.2")),
+)
 @patch("redun.executors.pueue.pueue_add")
 @patch("threading.Thread")
 @patch("redun.executors.pueue.iter_pueue_job_status")
@@ -164,6 +229,10 @@ def test_executor_pueue(
 
 
 @use_tempdir
+@patch(
+    "redun.executors.pueue.get_pueue_version",
+    new=Mock(return_value=PueueVersion(4, 0, 4, "-eva.2")),
+)
 @patch("redun.executors.pueue.pueue_add")
 @patch("threading.Thread")
 @patch("redun.executors.pueue.iter_pueue_job_status")
@@ -217,6 +286,10 @@ def test_executor_pueue_failure(
 
 
 @use_tempdir
+@patch(
+    "redun.executors.pueue.get_pueue_version",
+    new=Mock(return_value=PueueVersion(4, 0, 4, "-eva.2")),
+)
 @patch("redun.executors.pueue.pueue_add")
 @patch("threading.Thread")
 @patch("redun.executors.pueue.iter_pueue_job_status")

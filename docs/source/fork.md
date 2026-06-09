@@ -193,6 +193,8 @@ type = inline
 
 The `default_*` keys are read by `ContainerAware` and provide fallbacks when a task doesn't specify the option directly. Per-task options always override.
 
+The pueue executor requires **pueue 4.0 or newer** on the host; it logs the detected client version at scheduler start and refuses to run against older releases.
+
 ### Selecting a container runtime: `container_type`
 
 The runtime that runs your container — Apptainer or Docker — is a *host-environment* concern, not a task concern. The same `@task(container="X")` declaration runs unchanged across hosts; the host's executor config picks the local runtime via the `container_type` key:

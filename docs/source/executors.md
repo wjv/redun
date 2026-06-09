@@ -279,6 +279,8 @@ The **Pueue executor** (`type = pueue`) submits tasks to a [Pueue](https://githu
 
 This executor targets a Pueue fork that adds job-slot-based resource management (`pueued --jobs N`), allowing tasks to declare how many resource slots they consume. This is useful for managing concurrent workloads on a single multi-core server without a full cluster scheduler.
 
+**Pueue 4.0 or newer is required.** The executor logs the detected `pueue` client version at startup and refuses to start against older versions, whose `pueue status --json` output shape this code is not written to handle.
+
 ### How it works
 
 1. The executor submits each redun job via `pueue add`, receiving a task ID.

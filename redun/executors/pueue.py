@@ -33,6 +33,7 @@ Configuration example::
     no_home = true
 """
 
+import functools
 import json
 import logging
 import os
@@ -42,7 +43,7 @@ import threading
 import time
 from collections import OrderedDict
 from configparser import SectionProxy
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, NamedTuple, Optional, Tuple
 
 from redun.executors.base import Executor, register_executor
 from redun.executors.code_packaging import package_code, parse_code_package_config
@@ -65,9 +66,48 @@ from redun.task import Task
 SUCCEEDED = "SUCCEEDED"
 FAILED = "FAILED"
 
+MIN_PUEUE_MAJOR = 4
+
 
 class PueueError(Exception):
     pass
+
+
+class PueueVersion(NamedTuple):
+    major: int
+    minor: int
+    patch: int
+    suffix: str  # e.g. "-eva.2", or "" for stock upstream pueue.
+
+    def __str__(self) -> str:
+        return f"{self.major}.{self.minor}.{self.patch}{self.suffix}"
+
+
+@functools.cache
+def get_pueue_version() -> PueueVersion:
+    """Return the pueue client version.
+
+    Parses the output of ``pueue --version`` (e.g. ``pueue 4.0.4-eva.2``).
+    The numeric ``major.minor.patch`` is parsed for floor-checking; any
+    pre-release / fork suffix (``-eva.2``) is preserved verbatim so the
+    EVA fork can be identified in logs.
+    """
+    try:
+        output = subprocess.check_output(
+            ["pueue", "--version"], stderr=subprocess.PIPE
+        ).decode("utf8").strip()
+    except (subprocess.CalledProcessError, FileNotFoundError) as exc:
+        raise PueueError(f"could not run `pueue --version`: {exc}") from exc
+
+    match = re.search(r"(\d+)\.(\d+)\.(\d+)(\S*)", output)
+    if not match:
+        raise PueueError(f"could not parse pueue version from output: {output!r}")
+    return PueueVersion(
+        major=int(match.group(1)),
+        minor=int(match.group(2)),
+        patch=int(match.group(3)),
+        suffix=match.group(4),
+    )
 
 
 def pueue_add(
@@ -315,6 +355,13 @@ class PueueExecutor(ContainerAware, Executor):
         os.makedirs(self._scratch_prefix, exist_ok=True)
 
         if not self._is_running:
+            version = get_pueue_version()
+            if version.major < MIN_PUEUE_MAJOR:
+                raise PueueError(
+                    f"pueue >= {MIN_PUEUE_MAJOR}.0 required; found {version}"
+                )
+            self.log(f"Pueue client version {version}")
+
             self._is_running = True
             self._thread = threading.Thread(target=self._monitor, daemon=False)
             self._thread.start()
