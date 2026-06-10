@@ -296,7 +296,7 @@ def postprocess_script(result: Any, outputs: Any, temp_path: Optional[str] = Non
 _PIPELINE_STAGE_MARKER = "__REDUN_PIPELINE_STAGE_{i}__"
 
 
-def _build_pipeline_bash_body(n_stages: int) -> str:
+def _build_pipeline_bash_body(stages: tuple) -> str:
     """Bash body for an N-stage pipeline with per-stage stderr capture
     and PIPESTATUS preservation.
 
@@ -315,20 +315,38 @@ def _build_pipeline_bash_body(n_stages: int) -> str:
     over PIPESTATUS for failure attribution. Live mid-pipeline progress
     would require in-container instrumentation, which is out of scope for
     Phase 2.
+
+    The body embeds a deterministic ``# stages: <repr>`` comment so the
+    bash body string is unique to its stages tuple. This is essential
+    because ``script_task`` is special-cased in the scheduler to
+    ``CacheScope.CSE``, which keys on ``args_hash`` only — ``task_options``
+    (where ``_pipeline_stages`` rides) does NOT participate. Without this
+    comment, two distinct-content N-stage Pipe invocations within the
+    same execution produce identical bash bodies → identical args_hash →
+    CSE collision → the second invocation reuses the first's cached
+    result and the executor's marker-substitution path never runs.
     """
     # Per-stage line: each stage's stdout flows into the next via |;
     # each stage's stderr is teed to its own .task_error_<i> file AND
     # bubbled up to parent stderr (so it shows in pueue's log).
+    n_stages = len(stages)
     stage_lines: list[str] = []
     for i in range(n_stages):
         marker = _PIPELINE_STAGE_MARKER.format(i=i)
         stage_lines.append(f"{marker} 2> >(tee .task_error_{i} >&2)")
     pipeline = " | \\\n".join(stage_lines)
 
+    # Stages-identity comment so the bash body differs per stages tuple
+    # (see docstring above for the cache-key reason). Deterministic
+    # repr — ``stages`` is a tuple of (argv, container_or_None) pairs
+    # where argv is a tuple of str or a str, all hashable and stable.
+    stages_comment = "# stages: " + repr(stages)
+
     # Capture PIPESTATUS once (subsequent commands overwrite it); compute
     # headline RETCODE as first non-zero (better for diagnostics than
     # rightmost-non-zero, which is what pipefail's $? gives you).
     return f"""#!/usr/bin/env bash
+{stages_comment}
 set -o pipefail
 {pipeline}
 PIPESTATUS_COPY=("${{PIPESTATUS[@]}}")
@@ -375,6 +393,7 @@ def script(
     outputs: Any = NULL,
     tempdir: bool = False,
     as_mount: bool = False,
+    check_valid: str = "shallow",
     **task_options: Any,
 ) -> Any:
     """
@@ -403,6 +422,15 @@ def script(
         If True, run the command within a temporary directory.
     as_mount : bool
         If True, make use of cloud storage mounting (if available) to stage files.
+    check_valid : str
+        Cache-validity check mode for this script invocation. Defaults to
+        ``"shallow"`` — a cache hit is returned based on the call hash alone,
+        without verifying that declared ``outputs=File(path)`` files still
+        exist on disk. Pass ``"full"`` to invalidate the cache entry whenever
+        a declared output file is missing — the right setting for scripts
+        whose tool writes its real output via ``-o`` (rather than capturing
+        stdout) and whose declared output paths sit in scratch space that
+        may have been swept between attempts.
     **task_options : Any
         Options to configure the Executor, such as `vcpus=2` or `memory=3`.
 
@@ -439,8 +467,11 @@ def script(
         task_options["_pipeline_stages"] = stages_tuple
         # The command becomes a bash body where each stage's position is a
         # marker. The executor substitutes markers for per-stage container-
-        # wrapped invocations at submit time.
-        command = _build_pipeline_bash_body(len(pipe.stages))
+        # wrapped invocations at submit time. The bash body is built FROM
+        # the stages tuple (not just the stage count) so its text differs
+        # per pipeline content — critical for script_task's CSE cache key,
+        # which is keyed on args_hash only (task_options don't feed it).
+        command = _build_pipeline_bash_body(stages_tuple)
     else:
         # Single-stage: rebuild today's str/list command shape from the Cmd.
         only_stage = pipe.stages[0]
@@ -517,7 +548,7 @@ def script(
             return value
 
     input_args = map_nested_value(get_file, inputs)
-    return _script(
+    return _script.options(check_valid=check_valid)(
         full_command,
         input_args,
         outputs,

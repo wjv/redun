@@ -263,6 +263,51 @@ def test_script_file(scheduler: Scheduler) -> None:
     assert result["bye"].is_valid()
 
 
+def test_multistage_pipe_siblings_distinct_command_args() -> None:
+    """Two distinct-content multi-stage ``script(Pipe(...))`` calls must
+    produce DISTINCT ``command`` args to the inner ``_script`` /
+    ``script_task``.
+
+    Regression for the 46/47 ghost-success bug Q4 hit on 2026-06-10:
+    ``script_task`` is special-cased to ``CacheScope.CSE``, which keys on
+    ``args_hash`` only — ``task_options`` (where ``_pipeline_stages`` lives)
+    does NOT participate. Before the fix, ``_build_pipeline_bash_body``
+    returned an identical template string for any two same-length Pipes,
+    so all sibling multi-stage scripts collided on CSE within an execution
+    and only the first actually ran."""
+    expr_a = script(Cmd(["echo", "lib_a"]) | Cmd(["cat"]))
+    expr_b = script(Cmd(["echo", "lib_b"]) | Cmd(["cat"]))
+    # First arg to _script is the bash body that becomes script_task's
+    # `command` arg. Must differ per stages tuple.
+    assert expr_a.args[0] != expr_b.args[0]
+
+
+@use_tempdir
+def test_script_check_valid_full_reruns_on_missing_output(
+    scheduler: Scheduler,
+) -> None:
+    """``check_valid="full"`` round-trips through to actual execution and
+    a missing output file invalidates the cache, forcing re-execution."""
+    script_body = """
+        #!/bin/sh
+        echo 'fresh' > out.txt
+    """
+
+    result1 = scheduler.run(
+        script(script_body, outputs=File("out.txt"), check_valid="full")
+    )
+    assert result1.read() == "fresh\n"
+
+    os.remove("out.txt")
+    assert not os.path.exists("out.txt")
+
+    result2 = scheduler.run(
+        script(script_body, outputs=File("out.txt"), check_valid="full")
+    )
+    assert os.path.exists("out.txt")
+    assert result2.read() == "fresh\n"
+
+
 def test_command_eof() -> None:
     command = """
 run-prog --x 10
@@ -686,8 +731,13 @@ from redun.scripting import _build_pipeline_bash_body
 
 
 class TestPipelineBashBody:
+    @staticmethod
+    def _stages(n: int) -> tuple:
+        """Build a representative stages tuple of length n."""
+        return tuple(((f"echo", f"stage{i}"), None) for i in range(n))
+
     def test_two_stage_layout(self) -> None:
-        body = _build_pipeline_bash_body(2)
+        body = _build_pipeline_bash_body(self._stages(2))
         # Both stage markers appear.
         assert "__REDUN_PIPELINE_STAGE_0__" in body
         assert "__REDUN_PIPELINE_STAGE_1__" in body
@@ -703,12 +753,26 @@ class TestPipelineBashBody:
         assert 'exit "$RETCODE"' in body
 
     def test_n_stage_marker_count(self) -> None:
-        body = _build_pipeline_bash_body(4)
+        body = _build_pipeline_bash_body(self._stages(4))
         for i in range(4):
             assert f"__REDUN_PIPELINE_STAGE_{i}__" in body
             assert f".task_error_{i}" in body
         # Make sure we don't have a stage-5 marker.
         assert "__REDUN_PIPELINE_STAGE_4__" not in body
+
+    def test_body_differs_for_distinct_stages_of_same_length(self) -> None:
+        """Two same-length Pipes with different stage content must produce
+        DISTINCT bash bodies — script_task's CSE cache key is args_hash
+        only, so identical bodies would collide within an execution and
+        cause sibling cache hits (the 46/47 ghost-success bug Q4 hit
+        2026-06-10)."""
+        body_a = _build_pipeline_bash_body(
+            ((("echo", "lib_a"), None), (("cat",), None))
+        )
+        body_b = _build_pipeline_bash_body(
+            ((("echo", "lib_b"), None), (("cat",), None))
+        )
+        assert body_a != body_b
 
 
 class TestScriptDispatchPhase2:
@@ -828,8 +892,8 @@ def _build_and_substitute(pipe: Pipe) -> str:
     bare `ContainerAware` instance (no container wrapping; bare-stage path)."""
     from redun.executors.container_aware import ContainerAware
 
-    body = _build_pipeline_bash_body(len(pipe.stages))
     stages_tuple = tuple((s.argv, s.container) for s in pipe.stages)
+    body = _build_pipeline_bash_body(stages_tuple)
     ca = ContainerAware()
     return ca._substitute_pipeline_markers(body, stages_tuple, {})
 
