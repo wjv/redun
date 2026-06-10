@@ -558,7 +558,13 @@ def script(
     file_stages = [value for value in iter_nested_value(outputs) if isinstance(value, Staging)]
     command_parts.extend(file_stage.render_unstage(as_mount) for file_stage in file_stages)
 
-    full_command = "\n".join(command_parts)
+    # Drop empty parts before joining. No-op self-staging (an input
+    # File whose local.path == remote.path, staged purely for cache
+    # reactivity) yields an empty render_stage() string; without this
+    # filter, N such inputs prepend N blank lines to the command body,
+    # cluttering the `redun console` job label. The empties are
+    # no-ops at execution time, so dropping them is purely cosmetic.
+    full_command = "\n".join(part for part in command_parts if part)
 
     # Get input files for reactivity.
     def get_file(value: Any) -> Any:

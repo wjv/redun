@@ -258,14 +258,16 @@ def iter_pueue_job_status(
 
     Yields status dicts for tasks that have reached a terminal state.
 
-    If pueue can't account for a pending task (``task_info is None`` —
-    e.g. the daemon was restarted, ``pueue clean`` was run, or pueue
-    transiently dropped it under load), the per-job scratch ``status``
-    file is the ground truth: if the wrapper wrote ``ok``, the task
+    If our ``pueue status --json`` snapshot doesn't include a pending
+    task (``task_info is None``), the per-job scratch ``status`` file
+    is the ground truth: if the wrapper wrote ``ok``, the task
     succeeded; the redun monitor was just unlucky on the pueue poll
-    timing. (Q4 hit this on 2026-06-11 — 3-of-47 sibling tasks
+    timing or hit an inconsistent snapshot during a Running→Done
+    transition. (Q4 hit this on 2026-06-11 — 3-of-47 sibling tasks
     intermittently raising ScriptError despite the wrapper having
-    exited cleanly and the BAM being on disk.)
+    exited cleanly and the BAM being on disk. Pueue itself retained
+    the tasks correctly post-run; the misclassification was at the
+    poll-result-interpretation layer.)
     """
     if not pending_tasks:
         return

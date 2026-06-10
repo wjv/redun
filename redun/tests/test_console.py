@@ -2,7 +2,9 @@ import argparse
 
 from redun.backends.db import Tag
 from redun.console.parser import format_args, parse_args
-from redun.console.utils import get_links
+from redun.console.utils import get_links, summarise_script_command
+from redun.scripting import Cmd, script
+from redun import File
 
 
 def test_format_args() -> None:
@@ -27,6 +29,41 @@ def test_format_args() -> None:
     assert args.page == 1
     assert args.file == []
     assert format_args(parser, args) == argv
+
+
+class TestSummariseScriptCommand:
+    """`summarise_script_command` pulls the user-meaningful command out of
+    a script task's wrapped bash body, so the console job list shows
+    `redun.script(samtools …)` rather than the kilobyte wrapper."""
+
+    def test_single_stage_string_command(self) -> None:
+        body = script(
+            "samtools view -h in.bam | head", outputs=File("out.txt")
+        ).args[0]
+        assert summarise_script_command(body) == "samtools view -h in.bam | head"
+
+    def test_single_stage_skips_shebang_and_set(self) -> None:
+        body = script(
+            "#!/usr/bin/env bash\nset -e\nmy_tool --flag", outputs=File("o")
+        ).args[0]
+        # Shebang, set -e, and the boilerplate comments are skipped; the
+        # first real command line is surfaced.
+        assert summarise_script_command(body) == "my_tool --flag"
+
+    def test_multistage_pipe_renders_argvs(self) -> None:
+        body = script(
+            Cmd(["samtools", "import", "-@", "4", "in.fq"])
+            | Cmd(["evatags", "-o", "out.bam"]),
+            outputs=File("out.bam"),
+        ).args[0]
+        assert (
+            summarise_script_command(body)
+            == "samtools import -@ 4 in.fq | evatags -o out.bam"
+        )
+
+    def test_unrecognised_falls_back_to_raw(self) -> None:
+        # No heredoc, no stages comment — returned verbatim.
+        assert summarise_script_command("just some text") == "just some text"
 
 
 def test_format_link() -> None:
