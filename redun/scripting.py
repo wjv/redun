@@ -285,9 +285,21 @@ def postprocess_script(result: Any, outputs: Any, temp_path: Optional[str] = Non
             # Return the remote directly so any File state (hash_mode,
             # future fields) is preserved; re-instantiating from just
             # the path would silently drop everything but the path.
-            # The remote's `_hash` is unset at this point, so the
-            # cache-write triggers fresh post-script disk hashing.
-            return value.remote
+            #
+            # The remote's `_hash` MAY already be set — pickling the
+            # parent _script's intermediate TaskExpression into the
+            # eval-cache (scheduler.py:set_cache, BEFORE the script
+            # ran) descends into the outputs StagingFile and
+            # triggers File.__getstate__, which calls self.hash and
+            # captures the pre-script "missing"/"empty" disk state.
+            # Reset _hash here so the post-script CallNode.value_hash
+            # records the actual produced-output state. Otherwise
+            # `_is_valid_value` on a cross-run lookup re-hashes the
+            # (now-existing) file and mismatches the frozen
+            # pre-script hash, producing a cache miss.
+            f = value.remote
+            f._hash = None
+            return f
         else:
             return value
 

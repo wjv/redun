@@ -307,6 +307,56 @@ def test_script_preserves_output_hash_mode_through_staging() -> None:
     assert outputs_arg.remote.hash_mode == "exists_only"
 
 
+@use_tempdir
+def test_script_cross_run_cache_hit_with_persistent_backend(
+    tmp_path,
+) -> None:
+    """Two consecutive ``Scheduler`` instances against the same persistent
+    backend must cache-hit on the second run for a script that produces a
+    File output.
+
+    Regression for the eva.20 stale-`_hash` regression: ``get_file`` in
+    ``postprocess_script`` (eva.20) returned ``value.remote`` directly,
+    preserving the pre-script "missing"/"empty" hash that
+    ``File.__getstate__`` had captured when the parent ``_script``'s
+    intermediate TaskExpression was pickled into the eval-cache. The
+    cached File's frozen pre-script hash then mismatched the post-script
+    re-hash on lookup, producing a silent cross-run cache miss for any
+    ``script(outputs=File(...))`` pattern. (Q4 hit this 2026-06-11 with
+    bcl2fastq + sentinel.)"""
+    from redun.config import Config
+
+    db = tmp_path / "redun.db"
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    sentinel = scratch / "sentinel"
+    config = Config({"backend": {"db_uri": f"sqlite:///{db}"}})
+
+    @task
+    def writer():
+        return script(
+            f"echo done > {sentinel}",
+            outputs=File(str(sentinel), hash_mode="exists_only"),
+        )
+
+    # Run 1: writes sentinel, populates cache.
+    sched1 = Scheduler(config=config)
+    sched1.load()
+    r1 = sched1.run(writer())
+    assert sentinel.exists()
+    h1 = r1.hash
+
+    # Run 2: same backend, fresh scheduler. _script and script_task
+    # should cache-hit; subprocess must NOT re-run.
+    sched2 = Scheduler(config=config)
+    sched2.load()
+    r2 = sched2.run(writer())
+    assert r2.hash == h1, (
+        "Cross-run hash mismatch — likely the stale pre-script hash "
+        "regression has come back."
+    )
+
+
 def test_multistage_pipe_siblings_distinct_command_args() -> None:
     """Two distinct-content multi-stage ``script(Pipe(...))`` calls must
     produce DISTINCT ``command`` args to the inner ``_script`` /
