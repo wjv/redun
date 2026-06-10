@@ -263,6 +263,50 @@ def test_script_file(scheduler: Scheduler) -> None:
     assert result["bye"].is_valid()
 
 
+@use_tempdir
+def test_script_preserves_input_hash_mode_through_staging() -> None:
+    """``script(inputs=[File(p, hash_mode="content")])`` must surface a
+    content-mode File at ``_script``'s cache-input args, not silently
+    downgrade to stat mode through the staging round-trip.
+
+    Regression for Q4's eva.19 finding: ``get_file`` un-wrapped Staging
+    by re-instantiating ``cls(value.remote.path)``, which constructed a
+    fresh ``File`` with only the path — every other field (hash_mode,
+    any future state) was dropped. Now ``get_file`` returns
+    ``value.remote`` directly, preserving full File state.
+    """
+    File("input.txt").write("hello")
+    expr = script(
+        "true",
+        inputs=[File("input.txt", hash_mode="content")],
+        outputs=File("out.txt"),
+    )
+    # `expr` is the `_script` TaskExpression. _script's signature:
+    # (command, inputs, outputs, task_options, temp_path).
+    inputs_arg = expr.args[1]
+    assert isinstance(inputs_arg, list)
+    assert len(inputs_arg) == 1
+    assert inputs_arg[0].hash_mode == "content"
+
+
+@use_tempdir
+def test_script_preserves_output_hash_mode_through_staging() -> None:
+    """Same as the inputs case, but for outputs — the staging machinery
+    on the outputs side dropped hash_mode identically. Now the
+    StagingFile that flows into _script carries hash_mode on both
+    local and remote."""
+    expr = script(
+        "true",
+        outputs=File("out.txt", hash_mode="exists_only"),
+    )
+    from redun.file import StagingFile
+
+    outputs_arg = expr.args[2]
+    assert isinstance(outputs_arg, StagingFile)
+    assert outputs_arg.local.hash_mode == "exists_only"
+    assert outputs_arg.remote.hash_mode == "exists_only"
+
+
 def test_multistage_pipe_siblings_distinct_command_args() -> None:
     """Two distinct-content multi-stage ``script(Pipe(...))`` calls must
     produce DISTINCT ``command`` args to the inner ``_script`` /

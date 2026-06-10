@@ -282,8 +282,12 @@ def postprocess_script(result: Any, outputs: Any, temp_path: Optional[str] = Non
             return result
         elif isinstance(value, Staging):
             # Staging files and dir turn into their remote versions.
-            cls = type(value.remote)
-            return cls(value.remote.path)
+            # Return the remote directly so any File state (hash_mode,
+            # future fields) is preserved; re-instantiating from just
+            # the path would silently drop everything but the path.
+            # The remote's `_hash` is unset at this point, so the
+            # cache-write triggers fresh post-script disk hashing.
+            return value.remote
         else:
             return value
 
@@ -548,8 +552,11 @@ def script(
     def get_file(value: Any) -> Any:
         if isinstance(value, Staging):
             # Staging files and dir turn into their remote versions.
-            cls = type(value.remote)
-            return cls(value.remote.path)
+            # Return the remote directly so any File state (hash_mode,
+            # future fields) is preserved; re-instantiating from just
+            # the path would silently drop everything but the path
+            # — which manifested as Q4's eva.19 input-cache-miss bug.
+            return value.remote
         else:
             return value
 
