@@ -1220,32 +1220,68 @@ class FileClasses:
             raise AttributeError(attr)
 
 
+_VALID_HASH_MODES = frozenset({"stat", "content", "exists_only"})
+
+
 class File(Value):
     """
     Class for assisting file IO in redun tasks.
 
     File objects are hashed based on their contents and abstract over storage
     backends such as local disk or cloud object storage.
+
+    The ``hash_mode`` kwarg controls how a File's identity is hashed for
+    caching purposes:
+
+    - ``"stat"`` (default) — path + mtime + size. ``O(1)``. Cache busts on
+      any mtime drift; matches today's behaviour.
+    - ``"content"`` — sha256 of the file's bytes. ``O(N)`` in file size.
+      Cache hits when bytes match, regardless of path or mtime — the right
+      choice for small metadata files (samplesheets, config) where
+      semantic equality is content equality. Two byte-identical files at
+      different paths share a hash.
+    - ``"exists_only"`` — distinct hash for "exists at path" vs "missing
+      at path". ``O(1)``. Right for sentinel files where presence alone
+      is the signal, and for files too large to content-hash where
+      existence is sufficient.
+
+    Each mode's hash struct is mode-tagged, so a ``File(p)`` and a
+    ``File(p, hash_mode="content")`` have provably distinct hashes even
+    when the file is byte-stable.
     """
 
     type_basename = "File"
     type_name = "redun.File"
     classes = FileClasses()
 
-    def __init__(self, path: str):
+    def __init__(self, path: str, *, hash_mode: str = "stat"):
+        if hash_mode not in _VALID_HASH_MODES:
+            raise ValueError(
+                f"hash_mode must be one of {sorted(_VALID_HASH_MODES)}; "
+                f"got {hash_mode!r}"
+            )
         self.filesystem: FileSystem = get_filesystem(url=path)
         self.path: str = path
+        self.hash_mode: str = hash_mode
         self._hash: Optional[str] = None
 
     def __repr__(self) -> str:
-        return f"{self.type_basename}(path={self.path}, hash={self.hash[:8]})"
+        if self.hash_mode == "stat":
+            return f"{self.type_basename}(path={self.path}, hash={self.hash[:8]})"
+        return (
+            f"{self.type_basename}(path={self.path}, "
+            f"hash_mode={self.hash_mode}, hash={self.hash[:8]})"
+        )
 
     def __getstate__(self) -> dict:
-        return {"path": self.path, "hash": self.hash}
+        return {"path": self.path, "hash": self.hash, "hash_mode": self.hash_mode}
 
     def __setstate__(self, state: dict) -> None:
         self.path = state["path"]
         self._hash = state["hash"]
+        # BC for pickles that pre-date the hash_mode field — they're all
+        # implicitly "stat" mode (the only behaviour that existed).
+        self.hash_mode = state.get("hash_mode", "stat")
         self.filesystem = get_filesystem(url=self.path)
 
     @property
@@ -1255,7 +1291,28 @@ class File(Value):
         return self._hash
 
     def _calc_hash(self) -> str:
-        return self.filesystem.get_hash(self.path)
+        if self.hash_mode == "stat":
+            return self.filesystem.get_hash(self.path)
+        if self.hash_mode == "content":
+            return self._calc_content_hash()
+        if self.hash_mode == "exists_only":
+            return self._calc_exists_hash()
+        # Unreachable: validated at construction time.
+        raise ValueError(f"unknown hash_mode: {self.hash_mode!r}")
+
+    def _calc_content_hash(self) -> str:
+        """Content-mode hash: sha256 of bytes. Path-free by design so
+        byte-identical files at different paths share a hash."""
+        if not self.exists():
+            return hash_struct(["File", "content", "missing"])
+        with self.filesystem.open(self.path, "rb") as stream:
+            return hash_struct(["File", "content", hash_stream(stream)])
+
+    def _calc_exists_hash(self) -> str:
+        """Exists-only hash: distinct between exists / missing at path.
+        Path is included so sentinels at different paths are distinct."""
+        state = "exists" if self.exists() else "missing"
+        return hash_struct(["File", "exists_only", state, self.path])
 
     def get_hash(self, data: Optional[bytes] = None) -> str:
         return self.hash
@@ -1362,7 +1419,7 @@ class File(Value):
         elif local.endswith("/"):
             # Assume same basename for local file within given directory.
             local = os.path.join(local, os.path.basename(self.path))
-        return self.classes.StagingFile(local, self)
+        return self.classes.StagingFile(local, self, hash_mode=self.hash_mode)
 
     def basename(self) -> str:
         return os.path.basename(self.path)
@@ -1550,14 +1607,20 @@ class StagingFile(Staging[File]):
     type_name = "redun.StagingFile"
     classes = FileClasses()
 
-    def __init__(self, local: File | str, remote: File | str):
+    def __init__(
+        self,
+        local: File | str,
+        remote: File | str,
+        *,
+        hash_mode: str = "stat",
+    ):
         if isinstance(local, str):
-            self.local = self.classes.File(local)
+            self.local = self.classes.File(local, hash_mode=hash_mode)
         else:
             self.local = local
 
         if isinstance(remote, str):
-            self.remote = self.classes.File(remote)
+            self.remote = self.classes.File(remote, hash_mode=hash_mode)
         else:
             self.remote = remote
 

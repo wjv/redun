@@ -283,11 +283,17 @@ def test_multistage_pipe_siblings_distinct_command_args() -> None:
 
 
 @use_tempdir
-def test_script_check_valid_full_reruns_on_missing_output(
+def test_script_check_valid_full_round_trips_through_to_execution(
     scheduler: Scheduler,
 ) -> None:
-    """``check_valid="full"`` round-trips through to actual execution and
-    a missing output file invalidates the cache, forcing re-execution."""
+    """``check_valid="full"`` round-trips through ``script()`` →
+    ``_script.options()`` and reaches actual execution. A missing
+    output file invalidates the cache and forces re-execution.
+
+    (Note: this re-execution behaviour is independent of ``check_valid``
+    — ``_is_valid_value`` checks ``File.is_valid()`` after any cache
+    hit. The test just confirms the kwarg is wired end-to-end without
+    crashing.)"""
     script_body = """
         #!/bin/sh
         echo 'fresh' > out.txt

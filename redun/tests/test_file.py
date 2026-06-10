@@ -265,6 +265,140 @@ def test_file_hash() -> None:
     assert file.is_valid()
 
 
+class TestFileHashMode:
+    """Tests for the per-File ``hash_mode`` opt-in.
+
+    Three modes — ``stat`` (default; mtime+size+path), ``content`` (sha256
+    of bytes, path-free), ``exists_only`` (existence-as-signal). See
+    ``File`` docstring for the use-case rationale.
+    """
+
+    def test_invalid_mode_rejected(self) -> None:
+        with pytest.raises(ValueError, match="hash_mode must be one of"):
+            File("/tmp/x", hash_mode="bogus")  # type: ignore[arg-type]
+
+    def test_default_is_stat(self) -> None:
+        f = File("/tmp/x")
+        assert f.hash_mode == "stat"
+
+    @use_tempdir
+    def test_stat_mode_matches_pre_existing_hash(self) -> None:
+        """BC: a File(path) and File(path, hash_mode="stat") produce
+        identical hashes — the default and explicit ``stat`` are the
+        same code path."""
+        File("a.txt").write("payload")
+        h_default = File("a.txt").hash
+        h_explicit = File("a.txt", hash_mode="stat").hash
+        assert h_default == h_explicit
+
+    @use_tempdir
+    def test_content_mode_same_bytes_different_paths_share_hash(self) -> None:
+        """Content mode is path-free by design — byte-identical files
+        at different paths have the same hash."""
+        File("a.txt").write("identical")
+        File("b.txt").write("identical")
+        h_a = File("a.txt", hash_mode="content").hash
+        h_b = File("b.txt", hash_mode="content").hash
+        assert h_a == h_b
+
+    @use_tempdir
+    def test_content_mode_distinct_bytes_distinct_hashes(self) -> None:
+        File("a.txt").write("alpha")
+        File("b.txt").write("beta")
+        assert (
+            File("a.txt", hash_mode="content").hash
+            != File("b.txt", hash_mode="content").hash
+        )
+
+    @use_tempdir
+    def test_content_mode_survives_mtime_touch(self) -> None:
+        """Touching a file changes mtime but not content — content-mode
+        hash should be stable across the touch."""
+        File("a.txt").write("payload")
+        h_before = File("a.txt", hash_mode="content").hash
+        # Forward-dated touch so we don't get round-trip equality by luck.
+        os.utime("a.txt", (10**9, 10**9))
+        h_after = File("a.txt", hash_mode="content").hash
+        assert h_before == h_after
+
+    @use_tempdir
+    def test_content_mode_missing_distinct_from_present(self) -> None:
+        h_missing = File("nope.txt", hash_mode="content").hash
+        File("nope.txt").write("payload")
+        h_present = File("nope.txt", hash_mode="content").hash
+        assert h_missing != h_present
+
+    @use_tempdir
+    def test_exists_only_mode_invariant_to_content(self) -> None:
+        """Two existing files at the same path produce the same
+        exists_only hash regardless of their content."""
+        File("sentinel.txt").write("alpha")
+        h1 = File("sentinel.txt", hash_mode="exists_only").hash
+        File("sentinel.txt").write("a far longer different payload here")
+        h2 = File("sentinel.txt", hash_mode="exists_only").hash
+        assert h1 == h2
+
+    @use_tempdir
+    def test_exists_only_mode_exists_vs_missing_distinct(self) -> None:
+        h_missing = File("sentinel.txt", hash_mode="exists_only").hash
+        File("sentinel.txt").write("")
+        h_present = File("sentinel.txt", hash_mode="exists_only").hash
+        assert h_missing != h_present
+
+    @use_tempdir
+    def test_exists_only_mode_path_sensitive(self) -> None:
+        """Sentinels at different paths are different signals."""
+        File("s_a.txt").write("")
+        File("s_b.txt").write("")
+        assert (
+            File("s_a.txt", hash_mode="exists_only").hash
+            != File("s_b.txt", hash_mode="exists_only").hash
+        )
+
+    @use_tempdir
+    def test_modes_produce_three_distinct_hashes(self) -> None:
+        """Same path, three modes → three distinct hashes (mode-tag
+        defends against silent aliasing)."""
+        File("a.txt").write("payload")
+        h_stat = File("a.txt", hash_mode="stat").hash
+        h_content = File("a.txt", hash_mode="content").hash
+        h_exists = File("a.txt", hash_mode="exists_only").hash
+        assert len({h_stat, h_content, h_exists}) == 3
+
+    @use_tempdir
+    def test_pickle_round_trip_preserves_mode(self) -> None:
+        from redun.utils import pickle_dumps, pickle_loads
+
+        File("a.txt").write("payload")
+        f = File("a.txt", hash_mode="content")
+        _ = f.hash  # force compute
+        clone = pickle_loads(pickle_dumps(f))
+        assert clone.hash_mode == "content"
+        assert clone.hash == f.hash
+
+    def test_pickle_pre_hash_mode_pickle_defaults_to_stat(self) -> None:
+        """A pickle written before the hash_mode field existed must
+        deserialise as ``stat`` so old call-graph entries on production
+        backends keep working."""
+        f = File("/tmp/x")
+        # Simulate an old-shape state dict (no hash_mode key).
+        f.__setstate__({"path": "/tmp/x", "hash": "abc123"})
+        assert f.hash_mode == "stat"
+
+    @use_tempdir
+    def test_stage_propagates_hash_mode(self) -> None:
+        """``File.stage()`` must carry hash_mode through to the
+        resulting StagingFile's local and remote Files — otherwise a
+        ``script(outputs=File(p, hash_mode="content"))`` site would
+        have its mode silently downgraded to stat by the script()
+        machinery's `preprocess_output` call."""
+        File("a.txt").write("payload")
+        f = File("a.txt", hash_mode="content")
+        sf = f.stage("a.txt")
+        assert sf.local.hash_mode == "content"
+        assert sf.remote.hash_mode == "content"
+
+
 def test_glob() -> None:
     expected = [
         "redun/tests/test_data/file_glob/",

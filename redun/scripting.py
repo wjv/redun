@@ -423,14 +423,20 @@ def script(
     as_mount : bool
         If True, make use of cloud storage mounting (if available) to stage files.
     check_valid : str
-        Cache-validity check mode for this script invocation. Defaults to
-        ``"shallow"`` — a cache hit is returned based on the call hash alone,
-        without verifying that declared ``outputs=File(path)`` files still
-        exist on disk. Pass ``"full"`` to invalidate the cache entry whenever
-        a declared output file is missing — the right setting for scripts
-        whose tool writes its real output via ``-o`` (rather than capturing
-        stdout) and whose declared output paths sit in scratch space that
-        may have been swept between attempts.
+        Cache-lookup mode for this script invocation. Defaults to
+        ``"shallow"`` — uses the ULTIMATE-reduction cache layer
+        (whole-callgraph CallNode lookup keyed on task+args+context),
+        falling through to SINGLE-reduction (eval-hash) only on a miss.
+        Pass ``"full"`` to skip the ULTIMATE layer entirely and use
+        only SINGLE-reduction. ``"full"`` is a *weaker* cache, not a
+        stronger one — it consults fewer entries, not more.
+
+        Note that declared-output-File existence is verified after any
+        cache hit regardless of this setting (via the scheduler's
+        ``_is_valid_value`` → ``File.is_valid()`` rehashing of disk
+        content). So a missing output file always invalidates the
+        cache; ``check_valid`` is NOT the lever for output-file
+        validation.
     **task_options : Any
         Options to configure the Executor, such as `vcpus=2` or `memory=3`.
 

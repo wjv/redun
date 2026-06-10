@@ -171,6 +171,30 @@ If a task is genuinely sensitive to a specific environment variable, declare tha
 
 ---
 
+## Per-File `hash_mode`: choosing how a File participates in cache keys
+
+By default a `File`'s hash combines its path, modification time, and size — cheap (`O(1)`) and right when mtime drift is a valid signal that "different work was done." For some files this isn't the right semantic. The fork adds a `hash_mode` kwarg on `File`:
+
+```python
+File("samplesheet.csv", hash_mode="content")        # sha256 of bytes
+File("Undetermined.fq.gz", hash_mode="exists_only") # existence-as-signal
+File("results.bam")                                 # default: "stat"
+```
+
+| Mode | Cost | Hash depends on | When to use |
+|------|------|-----------------|-------------|
+| `stat` (default) | `O(1)` | path + mtime + size | Most outputs. Default. |
+| `content` | `O(N)` | bytes only (path-free) | Small metadata files where re-writing identical content shouldn't bust the cache. Two byte-identical files at different paths share a hash. |
+| `exists_only` | `O(1)` | existence at path | Sentinels (the `&& touch <path>` pattern); files too large to content-hash where existence alone is the signal. |
+
+Each mode's hash struct is mode-tagged, so the same path under different modes produces three distinct hashes — switching a site from `stat` to `content` deliberately busts its cache.
+
+`File.stage()` propagates the mode, so `script(outputs=File(p, hash_mode="content"))` works as expected — the resulting `StagingFile`'s local and remote both carry the mode.
+
+`Dir` and `FileSet` don't currently expose `hash_mode`; if you want that, file a request.
+
+---
+
 ## Configuration: `redun.ini`
 
 Minimal pueue executor with executor-level container defaults:
