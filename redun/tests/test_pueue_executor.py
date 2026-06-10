@@ -155,6 +155,77 @@ class TestPueueVersion:
             assert False, "expected PueueError"
 
 
+class TestIterPueueJobStatusMissingTask:
+    """Tests for ``iter_pueue_job_status`` when ``task_info is None`` —
+    i.e. the pueue daemon has lost visibility of a pending task (auto-
+    trim, ``pueue clean``, daemon restart, or a transient race).
+
+    Regression for Q4's 2026-06-11 intermittent failures: ~6% of sibling
+    ``script(Cmd | Cmd)`` tasks raised ScriptError despite the wrapper
+    having exited cleanly and the BAM being on disk. The executor was
+    blindly classifying ``task_info is None`` as FAILED — now it
+    consults the per-job scratch ``status`` file the wrapper writes as
+    ground truth."""
+
+    def _make_job(self, eval_hash: str = "abc123"):
+        @task
+        def t():
+            return 1
+
+        job = Job(t, cast(TaskExpression[int], t()))
+        job.eval_hash = eval_hash
+        return job
+
+    @patch("redun.executors.pueue.pueue_status")
+    def test_missing_task_with_ok_scratch_yields_success(
+        self, mock_status: Mock, tmp_path
+    ) -> None:
+        """``status: ok`` in scratch + pueue task missing → SUCCEEDED."""
+        from redun.executors.pueue import iter_pueue_job_status
+
+        mock_status.return_value = {"tasks": {}}
+        job = self._make_job()
+        job_dir = tmp_path / "jobs" / job.eval_hash
+        job_dir.mkdir(parents=True)
+        (job_dir / "status").write_text("ok\n")
+
+        results = list(iter_pueue_job_status({42: job}, str(tmp_path)))
+        assert len(results) == 1
+        assert results[0]["status"] == "SUCCEEDED"
+
+    @patch("redun.executors.pueue.pueue_status")
+    def test_missing_task_with_fail_scratch_yields_failed(
+        self, mock_status: Mock, tmp_path
+    ) -> None:
+        """``status: fail`` in scratch + pueue task missing → FAILED."""
+        from redun.executors.pueue import iter_pueue_job_status
+
+        mock_status.return_value = {"tasks": {}}
+        job = self._make_job()
+        job_dir = tmp_path / "jobs" / job.eval_hash
+        job_dir.mkdir(parents=True)
+        (job_dir / "status").write_text("fail\n")
+
+        results = list(iter_pueue_job_status({42: job}, str(tmp_path)))
+        assert len(results) == 1
+        assert results[0]["status"] == "FAILED"
+
+    @patch("redun.executors.pueue.pueue_status")
+    def test_missing_task_with_no_scratch_yields_failed(
+        self, mock_status: Mock, tmp_path
+    ) -> None:
+        """No scratch status file at all → FAILED (the genuine "lost"
+        case — wrapper never reached the status-write step)."""
+        from redun.executors.pueue import iter_pueue_job_status
+
+        mock_status.return_value = {"tasks": {}}
+        job = self._make_job()
+
+        results = list(iter_pueue_job_status({42: job}, str(tmp_path)))
+        assert len(results) == 1
+        assert results[0]["status"] == "FAILED"
+
+
 @use_tempdir
 @patch(
     "redun.executors.pueue.get_pueue_version",

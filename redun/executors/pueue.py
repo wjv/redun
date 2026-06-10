@@ -222,13 +222,50 @@ def get_pueue_task_status(task_info: dict) -> Optional[str]:
     return None
 
 
+def read_scratch_status(scratch_prefix: str, job: "Job") -> Optional[str]:
+    """Consult the per-job scratch ``status`` file as ground truth.
+
+    The script-task wrapper (:func:`redun.executors.command.get_script_task_command`)
+    writes ``ok`` or ``fail`` to ``<scratch>/jobs/<hash>/status`` after
+    the inner pipeline returns. The file exists iff the wrapper got
+    far enough to write it; its contents reflect the inner exit code.
+
+    Returns one of ``SUCCEEDED`` / ``FAILED`` / ``None`` (no status file
+    yet — the wrapper hasn't reached the write step).
+    """
+    status_path = get_job_scratch_file(scratch_prefix, job, SCRATCH_STATUS)
+    status_file = File(status_path)
+    if not status_file.exists():
+        return None
+    try:
+        content = status_file.read(mode="r")
+    except Exception:
+        return None
+    content = (content or "").strip()
+    if content == "ok":
+        return SUCCEEDED
+    if content == "fail":
+        return FAILED
+    return None
+
+
 def iter_pueue_job_status(
     pending_tasks: Dict[int, "Job"],
+    scratch_prefix: str,
     config_path: Optional[str] = None,
 ) -> Iterator[dict]:
     """Poll pueue for the status of pending tasks.
 
     Yields status dicts for tasks that have reached a terminal state.
+
+    If pueue can't account for a pending task (``task_info is None`` —
+    e.g. the daemon was restarted, ``pueue clean`` was run, or pueue
+    transiently dropped it under load), the per-job scratch ``status``
+    file is the ground truth: if the wrapper wrote ``ok``, the task
+    succeeded; the redun monitor was just unlucky on the pueue poll
+    timing. (Q4 hit this on 2026-06-11 — 3-of-47 sibling tasks
+    intermittently raising ScriptError despite the wrapper having
+    exited cleanly and the BAM being on disk.)
     """
     if not pending_tasks:
         return
@@ -240,12 +277,48 @@ def iter_pueue_job_status(
         pueue_id_str = str(pueue_id)
         task_info = all_tasks.get(pueue_id_str)
         if task_info is None:
-            # Task no longer exists in pueue — treat as failed.
-            yield {
-                "pueue_id": pueue_id,
-                "status": FAILED,
-                "logs": f"Pueue task {pueue_id} no longer exists.\n",
-            }
+            # Task no longer visible to pueue. Fall back to the
+            # scratch `status` file the wrapper writes.
+            #
+            # ASYMMETRY: we deliberately do NOT consult scratch
+            # when pueue reports FAILED (i.e. in the
+            # `get_pueue_task_status` branch below). The window
+            # between the wrapper's `echo ok > status` and the
+            # final `exit $RETCODE` is microseconds, so a kill
+            # signal landing in that window — producing scratch
+            # `ok` + pueue `Failed` — is empirically unobserved.
+            # If that combination ever shows up in the wild, the
+            # right fix is to extend the scratch-consultation to
+            # the FAILED path as well.
+            scratch_status = read_scratch_status(scratch_prefix, redun_job)
+            if scratch_status == SUCCEEDED:
+                yield {
+                    "pueue_id": pueue_id,
+                    "status": SUCCEEDED,
+                    "logs": (
+                        f"Pueue task {pueue_id} not in `pueue status` "
+                        f"output but wrapper recorded success in scratch.\n"
+                    ),
+                }
+            elif scratch_status == FAILED:
+                yield {
+                    "pueue_id": pueue_id,
+                    "status": FAILED,
+                    "logs": (
+                        f"Pueue task {pueue_id} not in `pueue status` "
+                        f"output; wrapper recorded failure in scratch.\n"
+                    ),
+                }
+            else:
+                # No scratch status either — really gone.
+                yield {
+                    "pueue_id": pueue_id,
+                    "status": FAILED,
+                    "logs": (
+                        f"Pueue task {pueue_id} no longer exists and "
+                        f"wrapper left no scratch status.\n"
+                    ),
+                }
             continue
 
         terminal_status = get_pueue_task_status(task_info)
@@ -383,7 +456,9 @@ class PueueExecutor(ContainerAware, Executor):
         try:
             while self._is_running and self._pending_jobs:
                 for job_status in iter_pueue_job_status(
-                    self._pending_jobs, config_path=self._config_path
+                    self._pending_jobs,
+                    self._scratch_prefix,
+                    config_path=self._config_path,
                 ):
                     self._process_job_status(job_status)
                 time.sleep(self._interval)
